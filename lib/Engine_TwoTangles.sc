@@ -622,6 +622,7 @@ Engine_TwoTangles : CroneEngine {
     }
     
     stepShiftRegister { arg which;
+        ("Stepping register: " ++ which).postln;
         var reg = if(which == \a, { shiftRegA }, { shiftRegB });
         var prob = stageProbability[which];
         var voiceIndex = if(which == \a, { 0 }, { 1 });
