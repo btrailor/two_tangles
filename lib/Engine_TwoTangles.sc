@@ -493,7 +493,7 @@ Engine_TwoTangles : CroneEngine {
                     if(beatCount % swingSubdiv == 0, {
                         evenBeat = true;
                     }, {
-                        evenBeat = not evenBeat;
+                        evenBeat = evenBeat.not;
                     });
                     
                     if(stepsSinceLastTrigger >= clockDivA, {
@@ -534,7 +534,7 @@ Engine_TwoTangles : CroneEngine {
                     if(beatCount % swingSubdiv == 0, {
                         evenBeat = true;
                     }, {
-                        evenBeat = not evenBeat;
+                        evenBeat = evenBeat.not;
                     });
                     
                     if(stepsSinceLastTrigger >= clockDivB, {
