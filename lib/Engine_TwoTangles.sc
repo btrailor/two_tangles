@@ -1031,11 +1031,16 @@ Engine_TwoTangles : CroneEngine {
         ^ratios[index];
     }
     
-    sendOSCWithActivity { arg which, values, activeStages;
-        var msg = ['/tt_state', which] ++ values ++ activeStages;
-        // Send to Norns Lua client, not SC server
-        NetAddr("127.0.0.1", 10111).sendMsg(*msg);
-}
+   sendOSCWithActivity { arg which, values, activeStages;
+        var addr;
+        addr = NetAddr.new("127.0.0.1", 10111);
+        addr.sendMsg('/tt_state', which, 
+            values[0], values[1], values[2], values[3],
+            values[4], values[5], values[6], values[7],
+            activeStages[0], activeStages[1], activeStages[2], activeStages[3],
+            activeStages[4], activeStages[5], activeStages[6], activeStages[7]
+        );
+    }
     
     addCommands {
         // Clock commands
@@ -1242,8 +1247,10 @@ Engine_TwoTangles : CroneEngine {
         });
         
         this.addCommand(\get_patches, "", { arg msg;
+            var addr;
+            addr = NetAddr.new("127.0.0.1", 10111);
             patchMatrix.do({ arg patch;
-                context.server.addr.sendMsg('/patch_data', 
+                addr.sendMsg('/patch_data', 
                     patch[0], patch[1], patch[2], patch[3], patch[4], patch[5]
                 );
             });
@@ -1423,8 +1430,10 @@ Engine_TwoTangles : CroneEngine {
         });
         
         this.addCommand(\get_mods, "", { arg msg;
+            var addr;
+            addr = NetAddr.new("127.0.0.1", 10111);
             modMatrix.do({ arg route;
-                context.server.addr.sendMsg('/mod_data',
+                addr.sendMsg('/mod_data',
                     route[0], route[1], route[2], route[3], route[4]
                 );
             });
