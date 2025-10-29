@@ -1027,7 +1027,10 @@ Engine_TwoTangles : CroneEngine {
     
     sendOSCWithActivity { arg which, values, activeStages;
         context.server.addr.sendMsg('/tt_state', which, 
-            *values, *activeStages
+            values[0], values[1], values[2], values[3],
+            values[4], values[5], values[6], values[7],
+            activeStages[0], activeStages[1], activeStages[2], activeStages[3],
+            activeStages[4], activeStages[5], activeStages[6], activeStages[7]
         );
     }
     
