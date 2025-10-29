@@ -432,38 +432,50 @@ Engine_TwoTangles : CroneEngine {
         OSCdef(\ttInputPitch, { arg msg;
             inputPitchValue = msg[3];
         }, '/ttInputPitch');
-}
+    }
     
     connectMIDIClock {
         MIDIIn.connectAll;
-        
-        midiClockIn = MIDIFunc.clock({ arg src, chan;
-            if(clockSource == 1, {
-                if(clockRunning, {
-                    beatCount = beatCount + 1;
-                    
-                    if(beatCount % 24 == 0, {
-                        this.clockTick;
+    
+        // MIDI Clock (0xF8) handler
+        midiClockIn = MIDIFunc.sysrt({ arg src, chan, type;
+            if(type == 8, {  // 8 = MIDI Clock (0xF8)
+                if(clockSource == 1, {
+                    if(clockRunning, {
+                        beatCount = beatCount + 1;
+                        
+                        if(beatCount % 24 == 0, {
+                            this.clockTick;
+                        });
                     });
                 });
             });
         });
         
-        MIDIFunc.start({
-            if(clockSource == 1, {
-                this.startClock;
+        // MIDI Start (0xFA)
+        MIDIFunc.sysrt({ arg src, chan, type;
+            if(type == 10, {  // 10 = MIDI Start (0xFA)
+                if(clockSource == 1, {
+                    this.startClock;
+                });
             });
         });
         
-        MIDIFunc.stop({
-            if(clockSource == 1, {
-                this.stopClock;
+        // MIDI Stop (0xFC)
+        MIDIFunc.sysrt({ arg src, chan, type;
+            if(type == 12, {  // 12 = MIDI Stop (0xFC)
+                if(clockSource == 1, {
+                    this.stopClock;
+                });
             });
         });
         
-        MIDIFunc.continue({
-            if(clockSource == 1, {
-                this.startClock;
+        // MIDI Continue (0xFB)
+        MIDIFunc.sysrt({ arg src, chan, type;
+            if(type == 11, {  // 11 = MIDI Continue (0xFB)
+                if(clockSource == 1, {
+                    this.startClock;
+                });
             });
         });
     }
