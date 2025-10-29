@@ -1033,7 +1033,8 @@ Engine_TwoTangles : CroneEngine {
     
     sendOSCWithActivity { arg which, values, activeStages;
     var msg = ['/tt_state', which] ++ values ++ activeStages;
-    context.server.addr.sendMsg(*msg);
+    // Send to Norns Lua client, not SC server
+    NetAddr("127.0.0.1", 10111).sendMsg(*msg);
 }
     
     addCommands {
