@@ -622,7 +622,6 @@ Engine_TwoTangles : CroneEngine {
     }
     
     stepShiftRegister { arg which;
-        ("Stepping register: " ++ which).postln;
         var reg = if(which == \a, { shiftRegA }, { shiftRegB });
         var prob = stageProbability[which];
         var voiceIndex = if(which == \a, { 0 }, { 1 });
@@ -634,6 +633,7 @@ Engine_TwoTangles : CroneEngine {
                            ((inputModReg == 1) && (which == \b));
         var newValue;
         var activeStages;
+        ("Stepping register: " ++ which).postln;
         
         if(isFrozen, {
             this.updateVoice(voiceIndex, reg);
