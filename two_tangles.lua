@@ -874,7 +874,10 @@ function load_mod_matrix(preset_number)
 end
 
 function osc.event(path, args, from)
+  print("OSC received: " .. path) 
+
   if path == "/tt_state" then
+    print("Register update received!")
     local reg = args[1]
     
     if reg == 'a' then
