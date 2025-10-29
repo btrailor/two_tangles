@@ -841,7 +841,7 @@ Engine_TwoTangles : CroneEngine {
             0, { fmRatio = this.getFMRatio(regValues[7]); },
             1, { fmRatio = regValues[7].linlin(0.0, 1.0, 0.5, 16); },
             2, { 
-                fmRsupercollideratio = 1;
+                fmRatio = 1;
                 noiseAmount = regValues[7] * 0.3;
             }
         );
