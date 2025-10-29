@@ -1087,8 +1087,9 @@ Engine_TwoTangles : CroneEngine {
         });
         
         this.addCommand(\clock_source, "i", { arg msg;
+            var sourceStr;
             clockSource = msg[1].clip(0, 1);
-            var sourceStr = if(clockSource == 0, { "internal" }, { "MIDI" });
+            sourceStr = if(clockSource == 0, { "internal" }, { "MIDI" });
             ("Clock source: " ++ sourceStr).postln;
         });
         
@@ -1117,14 +1118,16 @@ Engine_TwoTangles : CroneEngine {
         });
         
         this.addCommand(\unpatched_mode, "i", { arg msg;
+            var modeStr;
             unpatchedBehavior = msg[1].clip(0, 1);
-            var modeStr = if(unpatchedBehavior == 0, { "hold zero" }, { "random" });
+            modeStr = if(unpatchedBehavior == 0, { "hold zero" }, { "random" });
             ("Unpatched stages: " ++ modeStr).postln;
         });
         
         this.addCommand(\multipatch_mode, "i", { arg msg;
+            var modeStr;
             multiPatchMode = msg[1].clip(0, 3);
-            var modeStr = switch(multiPatchMode,
+            modeStr = switch(multiPatchMode,
                 0, { "average" },
                 1, { "sum" },
                 2, { "max" },
