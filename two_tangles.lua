@@ -881,9 +881,6 @@ function osc.event(path, args, from)
       for i=1,8 do
         shift_reg_a[i] = args[i+1]
         active_stages_a[i] = args[i+9]
-        lua
-] = args[i+9]
-        
         if active_stages_a[i] == 1 then
           trigger_pulse(REG_A_OUT, i)
         end
