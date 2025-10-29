@@ -1065,12 +1065,6 @@ Engine_TwoTangles : CroneEngine {
         });
         
         this.addCommand(\swing_subdiv, "i", { arg msg;
-            swingSubdiv = msg[1].clip(2, 4);
-            var subdivStr = if(swingSubdiv == 2, { "8th" }, { "16th" });
-            ("Swing subdivision: " ++ subdivStr ++ " notes").postln;
-        });
-        
-        this.addCommand(\swing_subdiv, "i", { arg msg;
             var subdivStr;
             swingSubdiv = msg[1].clip(2, 4);
             subdivStr = if(swingSubdiv == 2, { "8th" }, { "16th" });
