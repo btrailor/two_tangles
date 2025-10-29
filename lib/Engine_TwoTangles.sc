@@ -380,20 +380,20 @@ Engine_TwoTangles : CroneEngine {
     makeAudioInputAnalyzers {
         SynthDef(\ttInputFollower, { arg inBus=0, outBus=0, gain=1.0, smoothing=0.1;
             var input, amplitude;
-            
+        
             input = SoundIn.ar(inBus) * gain;
             amplitude = Amplitude.kr(input, 
                 attackTime: smoothing * 0.5, 
                 releaseTime: smoothing
             );
-            
+        
             SendReply.kr(Impulse.kr(20), '/ttInputAmp', amplitude);
             Out.ar(outBus, input);
         }).add;
-        
+    
         SynthDef(\ttInputPitch, { arg inBus=0;
             var input, freq, hasFreq;
-            
+        
             input = In.ar(inBus, 1);
             # freq, hasFreq = Pitch.kr(input,
                 initFreq: 440,
@@ -406,40 +406,33 @@ Engine_TwoTangles : CroneEngine {
                 peakThreshold: 0.5,
                 downSample: 1
             );
-            
+        
             freq = Select.kr(hasFreq, [440, freq]);
             SendReply.kr(Impulse.kr(20), '/ttInputPitch', freq);
         }).add;
-        
+    
         context.server.sync;
-        
+    
         inputFollower = Synth(\ttInputFollower, [
             \inBus, 0,
             \outBus, audioInputBus,
             \gain, inputGain,
             \smoothing, inputSmoothing
         ], target: context.ig);
-        
+    
         audioAnalyzer = Synth(\ttInputPitch, [
             \inBus, audioInputBus
         ], target: context.xg, addAction: \addAfter);
-        
+    
         OSCdef(\ttInputAmp, { arg msg;
             inputEnvelope = msg[3];
-            this.sendInputValues;
+            // Don't call sendInputValues here - it creates a loop
         }, '/ttInputAmp');
-        
+    
         OSCdef(\ttInputPitch, { arg msg;
             inputPitchValue = msg[3];
         }, '/ttInputPitch');
-    }
-    
-    sendInputValues {
-        context.server.addr.sendMsg('/tt_input_values', 
-            inputEnvelope, 
-            inputPitchValue
-        );
-    }
+}
     
     connectMIDIClock {
         MIDIIn.connectAll;
