@@ -1,8 +1,8 @@
-# Two Tangles v0.1
+# Two Tangles v0.2.1
 
-A dual shift register synthesis and sequencing instrument for Norns + Grid.
+A modular shift register synthesis and sequencing instrument for Norns + Grid.
 
-Two Tangles is inspired by the Lorre Mill Double Knot, implementing two 8-stage shift registers that can cross-patch and influence each other through a flexible routing matrix. Each shift register controls a voice with extensive sound shaping capabilities, while an advanced modulation system allows for evolving, generative patterns.
+Two Tangles is inspired by the Lorre Mill Double Knot, implementing two 8-stage shift registers that generate evolving patterns. These patterns can be routed to control 2-4 independent synthesizer voices through a flexible modulation matrix. The shift registers create data through feedback loops and cross-patching, while voices respond with continuous drone-like tones that can be rhythmically gated and modulated.
 
 ---
 
@@ -18,52 +18,108 @@ Two Tangles is inspired by the Lorre Mill Double Knot, implementing two 8-stage 
 
 1. **Install** Two Tangles via Maiden
 2. **Connect** your Grid
-3. **Load** the script
-4. **Press K1** (start clock)
-5. **Press** Grid column 1, row 1 (Register A output, stage 0)
-6. **Press** Grid column 16, row 1 (Register B input, stage 0)
-7. You've created your first patch! The shift registers are now connected.
+3. **Create a source patch**:
+   - Press Grid column 4, row 4 (high source = 0.75)
+   - Press Grid column 2, row 1 (Register A input, stage 0)
+   - You've patched `high → A0`
+4. **Add feedback**:
+   - Press Grid column 1, row 1 (A0 output)
+   - Press Grid column 2, row 1 (A0 input)
+   - You've patched `A0 → A0` (self-feedback loop)
+5. **Route to voice**:
+   - Turn **E1** to navigate to Page 5 (Voice Mod)
+   - Or hold Grid **[16,7]** and press **[1,5]** to jump directly
+6. **Add modulation**:
+   - Ensure Voice 1 is selected (columns 13-14, row 1 should be bright)
+   - Ensure Register A is selected (column 15, row 1 should be bright)
+   - Press **column 2, row 1** (A0 → Gate parameter)
+7. **Start the clock**:
+   - Press Grid **column 13, row 8** (Start/Stop button)
+8. You should now hear a continuous drone tone!
 
 ---
 
 ## Core Concepts
+
+### Architecture Overview
+
+Two Tangles uses a **decoupled modular architecture**:
+
+```
+External Sources → Shift Registers (Pattern Generation) → Voice Mod Matrix → Synthesizer Voices
+```
+
+1. **External Sources** inject values into the system
+2. **Shift Registers** create evolving patterns through feedback and patching
+3. **Voice Modulation Matrix** routes register values to voice parameters
+4. **Synthesizer Voices** (2-4) produce continuous sound with ADSR envelopes
 
 ### Shift Registers
 
 Two Tangles has two 8-stage shift registers (A and B). Each stage holds a value from 0.0 to 1.0. On each clock tick:
 
 1. Values shift through the register (stage 7 ← 6 ← 5... ← 1 ← 0)
-2. Stage 0 receives a new value based on patches
-3. Stage values control voice parameters
+2. Stage 0 receives a new value based on **patches from other stages or sources**
+3. All voices update, applying modulations from the current register values
 
-Think of it like a bucket brigade where water (values) passes from bucket to bucket, with the option to mix in water from the other brigade.
+Think of registers as **pattern generators** rather than direct voice controllers. They're like complex LFOs that evolve based on feedback and logic operations.
 
-### Patching
+### External Sources
 
-**Patches** connect shift register stages together:
+To get non-zero values into the system, patch from **external sources** (Grid column 4):
 
-- **Source**: Any stage output (columns 1 or 15 on Grid)
-- **Destination**: Any stage input (columns 2 or 16 on Grid)
+- **random** (row 1): New random value each step - excellent for generative patterns
+- **low** (row 2): Constant 0.25 - stable low offset
+- **mid** (row 3): Constant 0.5 - centered value
+- **high** (row 4): Constant 0.75 - stable high offset
+- **max** (row 5): Constant 1.0 - maximum value
+- **param1** (row 6): Controllable via encoder - real-time control
+- **param2** (row 7): Controllable via encoder - real-time control
+
+**Example**: Patch `random → A0` then `A0 → A0` creates a self-evolving random pattern.
+
+### Register Patching
+
+**Patches** connect sources and register stages together:
+
+- **Source**: External source OR register stage output (columns 1, 4, or 15)
+- **Destination**: Register stage input (columns 2 or 16)
 - **Logic Operation**: How the signal is processed (AND, OR, ADD, etc.)
 - **Weight**: How much influence (0-100%)
 
-Patches can be:
-- **Self-feedback**: Register A stage 7 → Register A stage 0
-- **Cross-register**: Register A stage 3 → Register B stage 0
-- **Complex networks**: Multiple patches targeting one stage
+Patches create **feedback networks** that generate complex evolving patterns:
+- **Self-feedback**: `A0 → A0` (stage feeds itself)
+- **Circular feedback**: `A0 → A1 → A2 → A0` (values circulate)
+- **Cross-register**: `A3 → B0` and `B5 → A2` (registers influence each other)
+- **Source injection**: `random → A0` (external entropy)
+
+### Voice Modulation Matrix
+
+**Page 5** lets you route register stage values to voice parameters:
+
+- **2-4 Voices** (configurable in params menu)
+- **12 Parameters per voice**: Pitch, Gate, Amp, Waveshape, Filter, FM, etc.
+- **Any stage can modulate any parameter on any voice**
+- **Independent routing**: Voice 1 responds to different stages than Voice 2
+
+**Example**:
+- Register A generates an evolving pattern via feedback
+- Route `A0 → Voice 1 Gate` (rhythm)
+- Route `A1 → Voice 1 Pitch` (melody)
+- Route `B0 → Voice 2 Filter` (timbre)
 
 ### Voice Synthesis
 
-Each register drives one voice. The 8 stages map to parameters:
+Voices are **continuous synthesizers** with:
+- Multiple waveforms (sine, triangle, saw, pulse)
+- RLPF resonant lowpass filter
+- FM synthesis
+- Sub oscillator
+- Noise generator
+- ADSR envelope (responds to gate modulation)
+- Stereo panning
 
-- **Stage 0**: Root pitch (quantized to scale)
-- **Stage 1**: Harmonic intervals
-- **Stage 2**: Gate/trigger
-- **Stage 3**: Filter cutoff
-- **Stage 4**: Filter resonance
-- **Stage 5**: Waveshape morph
-- **Stage 6**: FM amount / Sub oscillator
-- **Stage 7**: FM ratio / Timbral variation
+When a register stage is routed to the **gate** parameter, it controls note on/off. When routed to **pitch**, it controls frequency. This allows for both **rhythmic sequences** and **sustained drones**.
 
 ---
 
@@ -71,29 +127,67 @@ Each register drives one voice. The 8 stages map to parameters:
 
 ### Norns
 
-**Five Pages** (hold K1 to cycle):
-1. **Main**: Pattern view, patch info
-2. **Clock**: Tempo, divisions, swing
-3. **Performance**: Mute, freeze, pattern length, chaos
-4. **Audio Input**: External audio modulation
-5. **Mod Matrix**: Advanced modulation routing
+**Five Pages**:
+1. **Main**: Pattern view, patch info, register visualization
+2. **Clock**: Tempo, divisions, swing, sync options
+3. **Performance**: Mute, freeze, pattern length, chaos, feedback
+4. **Audio Input**: External audio modulation (legacy feature)
+5. **Voice Mod**: Voice modulation matrix - route stages to voice parameters
 
 **Keys:**
-- **K1**: Start/Stop (hold: change page)
+- **K1**: Hold for alternate encoder functions (clock start/stop via grid)
 - **K2**: Cancel/Reset
 - **K3**: Context-dependent (delete, toggle, etc.)
 
 **Encoders:**
-- **E1**: Tempo (or page-specific)
-- **E2**: Logic operation (or page-specific)
-- **E3**: Patch weight (or page-specific)
+- **E1**: **Page navigation** (turn to switch pages 1-5)
+- **E2**: Page-specific control
+- **E3**: Page-specific control
 
-### Grid (128)
+**K1 Hold + Encoders (Alternate Functions):**
+
+*Page 1 (Main):*
+- **K1+E1**: Tempo (20-300 BPM)
+- **K1+E2**: Clock division A
+- **K1+E3**: Clock division B
+
+*Page 2 (Clock):*
+- **K1+E2**: Swing subdivision (8th/16th)
+
+*Page 3 (Performance):*
+- **K1+E2**: Clock multiplier A (0.25x-4x)
+- **K1+E3**: Clock multiplier B (0.25x-4x)
+
+**Normal Encoder Functions (without K1):**
+
+*Page 1 (Main):*
+- **E2**: Logic operation selection
+- **E3**: Patch weight
+
+*Page 2 (Clock):*
+- **E2**: Swing amount
+- **E3**: Bar length
+
+*Page 3 (Performance):*
+- **E2**: Chaos amount
+- **E3**: Pattern length A
+
+*Page 4 (Audio Input):*
+- **E2**: Input modulation amount
+- **E3**: Input gain
+
+*Page 5 (Voice Mod):*
+- Encoders used for future features
+
+### Grid (128) - Main Pages
 
 **Columns 1-2**: Register A (output | input)
-**Columns 3**: Patch weight control
-**Columns 6-11**: Logic operations (13 operations)
+**Column 3**: Patch weight control (rows 1-8 = weight levels)
+**Column 4**: External sources (rows 1-7)
+**Columns 6-11**: Logic operations (13 operations across rows)
 **Columns 15-16**: Register B (output | input)
+
+**Row 7, Column 16**: **ALT button** (hold for alternative grid controls)
 
 **Row 8** (Performance controls):
 - **Col 4**: Clock A enable/mute
@@ -109,9 +203,41 @@ Each register drives one voice. The 8 stages map to parameters:
 - **Col 14**: Reset
 - **Col 16**: Reset on downbeat
 
-**Mod Matrix Page** (Page 5):
-- **Cols 1-8**: Modulation sources
-- **Cols 9-14**: Modulation destinations (per voice)
+### ALT Mode (Hold Grid [16,7])
+
+When holding the ALT button, the grid shows:
+
+**Row 1 (Page Navigation):**
+- **Col 1**: Jump to Page 1 (Main)
+- **Col 2**: Jump to Page 2 (Clock)
+- **Col 3**: Jump to Page 3 (Performance)
+- **Col 4**: Jump to Page 4 (Audio Input)
+- **Col 5**: Jump to Page 5 (Voice Mod)
+
+**Row 2 (Clear Registers):**
+- **Col 1**: Clear Register A
+- **Col 2**: Clear Register B
+
+**Row 3 (Randomize Registers):**
+- **Col 1**: Randomize Register A
+- **Col 2**: Randomize Register B
+
+**Row 4 (Utilities):**
+- **Col 1**: Clear all patches
+
+### Grid - Page 5 (Voice Mod Matrix)
+
+**Columns 1-12**: Voice parameters (Pitch, Gate, Amp, Wave, Filter, Res, FM, FMR, PW, Sub, Noise, Pan)
+**Rows 1-8**: Register stages from selected register (A or B)
+**Columns 13-14**: Voice selection (1-4, depending on voice_count setting)
+**Column 15**: Register selection (A or B)
+**Column 16**: Reserved for future features
+
+**Workflow**:
+1. Select voice (press column 13/14)
+2. Select register source (press column 15, row 1 or 2)
+3. Click at stage row × parameter column to toggle modulation
+4. Bright LED = active modulation
 
 ---
 
@@ -137,144 +263,154 @@ Each register drives one voice. The 8 stages map to parameters:
 
 ## Workflow Examples
 
-### Example 1: Self-Evolving Drone
+### Example 1: Simple Generative Drone
 
-**Goal**: Create a slowly evolving ambient texture
+**Goal**: Single voice with evolving pitch and rhythm
 
 **Steps**:
-1. Set tempo to 40 BPM
-2. Clock div A = 4, Clock div B = 6 (slow polyrhythm)
-3. **Patch 1**: Register A, stage 7 → A, stage 0 (MULTIPLY, 80%)
-4. **Patch 2**: Register B, stage 5 → A, stage 3 (ADD, 40%)
-5. Randomize both registers (Grid row 8)
-6. Set pattern length A = 6, B = 8
-7. Add slight chaos (10-20%) for drift
+1. **Main Page**: Press col 4, row 1 (random source)
+2. Press col 2, row 1 (patch `random → A0`)
+3. Press col 1, row 1 then col 2, row 1 (patch `A0 → A0` for self-feedback)
+4. **Page 5** (hold K1 to cycle): Select Voice 1, Register A
+5. Press col 2, row 1 (`A0 → Gate`)
+6. Press col 1, row 2 (`A1 → Pitch`)
+7. **K1** to start clock
 
-**Result**: Slow-moving harmonies with evolving filter movement
+**Result**: Voice 1 plays evolving random notes with rhythmic gates
 
 ---
 
-### Example 2: Rhythmic Interaction
+### Example 2: Dual Voices with Cross-Modulation
 
-**Goal**: Two voices playing complementary rhythms
+**Goal**: Two voices with independent but related patterns
 
 **Steps**:
-1. Tempo: 120 BPM
-2. Clock div A = 1, B = 1 (both on quarter notes)
-3. **Patch 1**: A, stage 2 → B, stage 2 (XOR, 100%)
-4. **Patch 2**: B, stage 7 → A, stage 0 (DIRECT, 60%)
-5. **Patch 3**: A, stage 7 → B, stage 0 (DIRECT, 60%)
-6. Set pattern length A = 3, B = 4
+1. Create random source feeding Register A with feedback:
+   - `random → A0`, `A0 → A0`
+2. Cross-patch to Register B:
+   - `A3 → B0`, `B0 → B0`
+3. **Page 5**:
+   - Voice 1, Register A: `A0 → Gate`, `A1 → Pitch`, `A2 → Filter`
+   - Voice 2, Register B: `B0 → Gate`, `B1 → Pitch`, `B3 → Pan`
+4. Start clock
 
-**Result**: Register A and B trade hits (XOR gates), creating 3 against 4 polyrhythm with melodic exchange
+**Result**: Two voices with related but independent evolving patterns
 
 ---
 
-### Example 3: Audio-Reactive Sequence
+### Example 3: Four-Voice Chord Generator
 
-**Goal**: External audio controls the sequence
+**Goal**: Harmonic chord progressions across 4 voices
 
 **Steps**:
-1. Connect audio source to Norns input
-2. Go to Audio Input page (page 4)
-3. Set input mod amount: 70%
-4. Set target: "All"
-5. Set gain to taste
-6. Create feedback patches in registers
-7. Speak/play into mic
+1. **Params menu**: Set Voice Count = 4
+2. Create stable pattern with `mid → A0`, `A0 → A0`
+3. Add variation with `A1 → A0 (ADD, 30%)`
+4. **Page 5** - Route A0 to all 4 voice gates:
+   - Voice 1: `A0 → Gate`, `A0 → Pitch`
+   - Voice 2: `A0 → Gate`, `A1 → Pitch`
+   - Voice 3: `A0 → Gate`, `A2 → Pitch`
+   - Voice 4: `A0 → Gate`, `A3 → Pitch`
+5. Start clock
 
-**Result**: Shift registers respond to input dynamics and pitch, creating reactive patterns
+**Result**: Four voices playing together with different pitches from different register stages
 
 ---
 
-### Example 4: LFO Modulated Timbre
+### Example 4: Rhythmic Interplay
 
-**Goal**: Slowly shifting timbres on both voices
+**Goal**: Complex polyrhythmic patterns
 
 **Steps**:
-1. Go to Mod Matrix page (page 5)
-2. Set LFO 1 rate: 0.2 Hz, shape: Sine
-3. Set LFO 2 rate: 0.33 Hz, shape: Triangle
-4. **Mod 1**: LFO1 → Both Voices Filter Freq (50%)
-5. **Mod 2**: LFO2 → Both Voices Waveshape (30%)
-6. Create simple feedback patches
-7. Let it evolve
+1. Set tempo 130 BPM, pattern length A=3, B=4
+2. Register A: `random → A0`, `A0 → A1`, `A1 → A0` (circular pattern)
+3. Register B: `random → B0`, `B0 → B1`, `B1 → B0`
+4. **Page 5**:
+   - Voice 1, Register A: `A0 → Gate`, `A1 → Pitch`, `A2 → Filter`
+   - Voice 2, Register B: `B0 → Gate`, `B1 → Pitch`, `B2 → Amp`
 
-**Result**: Timbres morph slowly, independent of shift register patterns
+**Result**: 3-against-4 polyrhythm with independent gate patterns
 
 ---
 
-### Example 5: Generative Melody with Chaos
+### Example 5: Slow-Moving Ambient Texture
 
-**Goal**: Controlled randomness creating melodies
+**Goal**: Long sustained drones with slow modulation
 
 **Steps**:
-1. Tempo: 100 BPM
-2. Pattern length A = 5, B = 7 (prime numbers)
-3. **Patch 1**: A, stage 4 → A, stage 0 (ADD, 60%)
-4. **Patch 2**: B, stage 3 → A, stage 1 (MULTIPLY, 40%)
-5. Randomize Register A
-6. Set mutation rate: 5% (slow evolution)
-7. Set chaos: 15% (gentle wobble)
+1. Tempo: 40 BPM, Clock div A=8 (very slow)
+2. Register A: `low → A0`, `A0 → A0` (stable low value)
+3. Register B: `random → B0`, `B0 → B1 → B2 → B0` (slow evolution)
+4. **Page 5**:
+   - Voice 1, Reg A: `A0 → Gate` (always on), `A0 → Amp` (stable)
+   - Voice 1, Reg B: `B0 → Pitch`, `B1 → Filter`, `B2 → FMRatio`
+5. Set slew mode: Slew, slew time: 500ms
 
-**Result**: Melodies slowly mutate while maintaining coherence
+**Result**: Sustained drone with slowly evolving timbre from Register B
 
 ---
 
 ### Example 6: Percussive Patterns
 
-**Goal**: Drum-like rhythms using short gates
+**Goal**: Short rhythmic hits
 
 **Steps**:
-1. Tempo: 130 BPM, swing: 65% (shuffle feel)
-2. Clock div A = 1, B = 2
-3. Pattern length A = 4, B = 3
-4. Stage mapping: Set stage 2 to mode 1 (probability gates)
-5. **Patch 1**: A, stage 7 → A, stage 2 (OR, 100%)
-6. Set slew mode: Sample-Hold (snappy)
-7. Increase filter resonance (stage 4 values)
+1. Tempo: 140 BPM, pattern length A=4
+2. Register A: `random → A0`, `A0 → A0`
+3. **Page 5**:
+   - Voice 1, Reg A: `A0 → Gate`, `A1 → Pitch`, `A2 → Amp`
+4. Params: Set ADSR release time very short (adjust in engine if needed)
+5. Set slew mode: Sample-Hold for sharp transients
 
-**Result**: Tight, percussive hits with evolving rhythms
+**Result**: Percussive rhythmic patterns
 
 ---
 
-### Example 7: Call and Response
+### Example 7: Call and Response Between Voices
 
 **Goal**: Two voices trading phrases
 
 **Steps**:
-1. Tempo: 90 BPM
-2. Pattern length A = 8, B = 8
-3. Mute Register B
-4. Build pattern in A, then freeze A
-5. Copy A → B (Grid col 8, row 8)
-6. Unmute B, mute A
-7. Let B evolve for a few bars
-8. Unmute A, alt-mute between them
+1. Register A: `random → A0`, `A0 → A1 → A0` (circular feedback)
+2. Register B: `A7 → B0` (copy end of A to start of B), `B0 → B0`
+3. **Page 5**:
+   - Voice 1, Reg A: `A0 → Gate`, `A1 → Pitch`
+   - Voice 2, Reg B: `B0 → Gate`, `B1 → Pitch`
+4. Alternate mutes between Voice 1 and Voice 2 manually
 
-**Result**: Structured call-and-response phrases
+**Result**: Voices echo each other's patterns
 
 ---
 
-### Example 8: Extreme Feedback
+### Example 8: Dense Textural Layers
 
-**Goal**: Chaotic, dense textures
+**Goal**: Four voices creating thick textures
 
 **Steps**:
-1. Tempo: 160 BPM
-2. Clock mult A = 2x, B = 4x (double/quad speed)
-3. **Patch 1**: A, stage 7 → B, stage 0 (ADD, 100%)
-4. **Patch 2**: B, stage 7 → A, stage 0 (ADD, 100%)
-5. **Patch 3**: A, stage 3 → A, stage 0 (MULTIPLY, 80%)
-6. **Patch 4**: B, stage 2 → B, stage 0 (XOR, 100%)
-7. Set feedback amount: 150%
-8. Chaos: 30%
+1. **Params**: Voice Count = 4
+2. Create complex feedback network:
+   - `random → A0`, `A0 → A1`, `A1 → A2`, `A2 → A0`
+   - `A3 → B0`, `B0 → B3`, `B3 → A5`
+3. **Page 5** - Route different stages to each voice:
+   - Voice 1: `A0 → Gate`, `A1 → Pitch`, `A2 → Filter`
+   - Voice 2: `A3 → Gate`, `A4 → Pitch`, `A5 → Pan`
+   - Voice 3: `B0 → Gate`, `B1 → Pitch`, `B2 → WaveShape`
+   - Voice 4: `B3 → Gate`, `B4 → Pitch`, `B5 → NoiseAmount`
+4. Add chaos: 15%, feedback: 120%
 
-**Result**: Dense, chaotic textures with complex rhythmic interactions
+**Result**: Dense evolving texture with 4 independent but related voices
 
 ---
 
 ## Parameter Reference
+
+### Voice
+- **Voice Count**: 2 or 4 voices (requires restart to take effect)
+- **Slew Mode**: Sample-Hold (stepped) / Slew (smooth)
+- **Slew Time**: 1ms - 1s (smooths parameter changes)
+- **Unpatched Stages**: Hold Zero / Random
+- **Multi-Patch Mode**: Average / Sum / Max / Min
+- **Global Feedback**: 0-100%
 
 ### Clock
 - **Tempo**: 20-300 BPM
@@ -286,69 +422,73 @@ Each register drives one voice. The 8 stages map to parameters:
 - **Bar Length**: 4, 8, 16, 32, 64 beats
 - **Clock A/B Enable**: Per-register on/off
 
-### Voice
-- **Slew Mode**: Sample-Hold (stepped) / Slew (smooth)
-- **Slew Time**: 1ms - 1s
-- **Unpatched Stages**: Hold Zero / Random
-- **Multi-Patch Mode**: Average / Sum / Max / Min
-- **Global Feedback**: 0-100%
-
 ### Performance
-- **Mute A/B**: Silence individual registers
+- **Mute A/B**: Silence individual registers (stops voice updates from that register)
 - **Freeze A/B**: Stop shifting, hold pattern
 - **Pattern Length A/B**: 1-8 active stages
 - **Clock Mult A/B**: 0.25x - 4x speed
 - **Feedback Amount**: 0-200% (quick control)
-- **Chaos**: 0-100% controlled randomness
-- **Mutation**: 0-100% random stage changes
-
-### Audio Input
-- **Input Mod Amount**: 0-100%
-- **Input Mod Target**: Pitch / Gates / All / Complex
-- **Input Modulates**: Register A / B / Both
-- **Input Gain**: 0-4x
-- **Input Smoothing**: 1ms - 1s
+- **Chaos**: 0-100% controlled randomness added to register values
+- **Mutation**: 0-100% random stage changes per step
 
 ### Stage Probabilities
 - Per register, per stage: 0-100% chance to update
+- Lower probability = stage skips updates = rhythmic variation
 
-### Stage Mappings
+### Stage Mappings (Legacy)
 - Per register, per stage: 3 alternate modes
-- Changes how each stage affects the voice
-
-### Modulation Matrix
-- 4 LFOs with rate (0.01-20 Hz) and shape control
-- 24 mod sources → 11 destinations per voice
-- Amount: -100% to +100%
+- Note: With new architecture, use Voice Mod page instead
 
 ---
 
 ## Performance Tips
 
-### Building Complexity
-1. Start with one register, simple patches
-2. Add second register once first is interesting
-3. Layer modulations gradually
-4. Use freeze to capture good moments
+### Building Patches from Scratch
+
+1. **Start with a source**: Pick `random` for generative, `mid/high` for stable
+2. **Create self-feedback**: Source → A0, A0 → A0
+3. **Go to Page 5**: Route A0 to Gate and Pitch for basic sequence
+4. **Start clock**: You should hear evolving tones
+5. **Add complexity**: More stages, cross-register patches, multiple voices
+
+### Understanding Feedback Loops
+
+- **No feedback = decay**: Without loops, values return to zero
+- **Self-feedback**: `A0 → A0` maintains and transforms value
+- **Circular**: `A0 → A1 → A2 → A0` creates rotating patterns
+- **Cross-register**: `A7 → B0` shares pattern end with other register
+
+### Voice Modulation Strategy
+
+- **Gate**: Controls note on/off - essential for rhythm
+- **Pitch**: Controls frequency - creates melody
+- **Filter**: Controls timbre - adds movement
+- **Amp**: Controls volume - creates dynamics
+- **Others**: Add timbral complexity (FM, waveshape, sub osc)
 
 ### Live Manipulation
-- **Mute/unmute** for arrangement
-- **Pattern length** for rhythmic variation
-- **Clock multipliers** for buildups
-- **Chaos/mutation** for evolution
-- **Freeze** for dramatic stops
+
+- **Switch voices**: Change which voice/register you're modulating
+- **Toggle mods**: Add/remove routings to reshape sound
+- **Mute registers**: Stop pattern generation without clearing
+- **Freeze**: Capture interesting patterns
+- **Chaos/Mutation**: Inject controlled randomness
 
 ### Sound Design
-- **Short pattern lengths** (1-3) = rhythmic loops
-- **Long pattern lengths** (6-8) = evolving sequences
-- **High feedback** = complex interactions
-- **Low feedback** = predictable patterns
-- **Slew mode** = smooth vs. stepped character
 
-### Saving Presets
+- **Short ADSR release** + fast tempo = percussive
+- **Long ADSR sustain** + slow tempo = ambient drones
+- **Many modulations** = complex evolving timbre
+- **Minimal modulations** = predictable, focused sound
+- **High feedback amount** = more interaction, instability
+- **Low feedback** = more controlled, stable patterns
+
+### Saving Work
+
 - Use Norns PSET system (PARAMETERS > PSET)
-- Patches and modulations save automatically
+- Patches and voice modulations save automatically
 - 99 preset slots available
+- Consider naming presets descriptively
 
 ---
 
@@ -356,54 +496,80 @@ Each register drives one voice. The 8 stages map to parameters:
 
 **No sound?**
 - Check clock is running (K1)
-- Verify clock enables (Grid row 8, cols 4 & 12)
-- Check mutes (Performance page or Grid)
-- Ensure at least one patch exists
+- Verify at least one **voice modulation** exists (Page 5)
+- Ensure the modulation includes **gate** and **pitch**
+- Check that register has non-zero values (needs source + feedback)
+- Verify voice not muted
 
-**Registers not moving?**
-- Check freeze state (Performance page)
-- Verify clock divisions aren't too high
-- Check stage probabilities (might be set to 0%)
+**Registers stay at zero?**
+- You need **external sources** (column 4) to inject values
+- You need **feedback loops** to maintain values
+- Example: `random → A0` and `A0 → A0`
 
 **Patches not working?**
-- Check global feedback amount
-- Verify patch weight isn't 0%
-- Try different logic operations
+- Patches alone don't make sound - they generate patterns in registers
+- You need **voice modulations** (Page 5) to route patterns to sound
+- Check global feedback amount isn't zero
+
+**Voice modulations not working?**
+- Ensure register stages have non-zero values
+- Check that you've selected the correct voice and register
+- Try routing to Gate and Pitch first for basic test
 
 **Too chaotic?**
-- Reduce feedback amount
-- Lower chaos and mutation
+- Reduce chaos and mutation parameters
 - Use simpler logic operations (DIRECT, AVERAGE)
-- Reduce number of patches
+- Reduce feedback amount
+- Use stable sources (mid, high) instead of random
 
 **Too static?**
+- Add `random` source injection
 - Increase pattern lengths
-- Add mutation (5-10%)
-- Use more complex logic (XOR, MODULO)
-- Add modulation matrix routings
+- Add mutation (5-15%)
+- Use more complex logic (XOR, MULTIPLY, MODULO)
+- Add more feedback loops
+
+**All 4 voices playing?**
+- Check voice count setting in params (2 vs 4)
+- Verify voice modulations exist for each voice on Page 5
+- Check per-voice routing isn't muted
 
 ---
 
 ## Technical Notes
 
+### Architecture
+
+**v0.2 introduces decoupled voices:**
+- Shift registers are pure **pattern generators**
+- Voices are **independent synthesizers**
+- **Voice Modulation Matrix** connects the two
+- Allows 2-4 voices vs. previous fixed 2 (1 per register)
+
 ### Audio Engine
 - Custom SuperCollider engine
-- Dual voices with independent synthesis
-- Moog-style ladder filter
+- Up to 4 persistent voices with ADSR envelopes
+- Voices always exist, gate parameter controls on/off
+- RLPF resonant lowpass filter
 - FM synthesis with musical ratios
 - Sub oscillator and noise generator
+- Stereo panning per voice
 
 ### Shift Register Implementation
-- One-sample delay prevents infinite loops
+- 8 stages per register (A and B)
+- Values 0.0-1.0 representing voltage-like control data
 - Patch matrix evaluated per clock tick
 - 13 logic operations for signal processing
-- Quantized pitch output (minor pentatonic default)
+- External sources inject initial values
+- Feedback networks create evolving patterns
 
-### Modulation System
-- 4 independent LFO generators
-- Audio input analysis (envelope + pitch tracking)
-- Clock-synced modulation sources
-- Per-voice destination routing
+### Voice Modulation System
+- Per-voice routing: any stage → any parameter
+- 12 parameters per voice can be modulated
+- Modulation applied every clock step
+- Amount fixed at 1.0 (future: adjustable per route)
+- Gate parameter uses threshold (>0.4 = gate open)
+- Pitch modulation uses ±2 octave range from base freq
 
 ### File Structure
 ```
@@ -413,8 +579,8 @@ Each register drives one voice. The 8 stages map to parameters:
 │   └── Engine_TwoTangles.sc (SuperCollider engine)
 
 /home/we/dust/data/two_tangles/
-├── patches_N.json           (patch matrices per preset)
-└── mods_N.json             (modulations per preset)
+├── patches_N.json           (register patch matrices per preset)
+└── voice_mods_N.json        (voice modulations per preset - NEW in v0.2)
 ```
 
 ---
@@ -422,13 +588,32 @@ Each register drives one voice. The 8 stages map to parameters:
 ## Credits
 
 **Concept**: Inspired by Lorre Mill Double Knot
-**Development**: [Your Name]
-**Version**: 0.1
+**Architecture**: Modular shift register synthesis
+**Version**: 0.2
 **License**: MIT
 
 ---
 
 ## Changelog
+
+### v0.2.1 (UI/UX Improvements)
+- **E1 global page navigation**: Turn E1 to quickly switch between pages 1-5
+- **ALT button on grid [16,7]**: Hold for alternative controls including page navigation
+- **K1 hold modifier**: Access alternate encoder functions (tempo, clock divs, multipliers)
+- **Improved screen help text**: Dynamic display shows current encoder assignments
+- **Quick utility access**: Clear/randomize registers via ALT mode
+- **Direct page jumping**: Hold ALT and press row 1 buttons to jump to any page
+- **Tempo control**: K1+E1 on Page 1 for quick tempo adjustments
+
+### v0.2 (Major Architecture Update)
+- **Decoupled voices from registers**: Voices are now independent synthesizers
+- **Voice count configurable**: 2 or 4 voices (params menu)
+- **Voice Modulation Matrix**: New Page 5 for routing stages to voice parameters
+- **External sources**: 7 sources (random, constants, params) for injecting values
+- **Removed stage mappings**: Replaced with flexible voice modulation routing
+- **Updated register logic**: Registers are pure pattern generators
+- **Persistent voices**: ADSR envelopes with gate control
+- **12 modulatable parameters per voice**: Pitch, Gate, Amp, Wave, Filter, Res, FM, FMR, PW, Sub, Noise, Pan
 
 ### v0.1 (Initial Release)
 - Dual 8-stage shift registers
@@ -438,21 +623,22 @@ Each register drives one voice. The 8 stages map to parameters:
 - Clock system with MIDI sync, swing, divisions
 - Performance macros (mute, freeze, pattern length, etc.)
 - Audio input modulation
-- Modulation matrix with 4 LFOs
+- Legacy modulation matrix with 4 LFOs
 - PSET integration
-- Comprehensive parameter control
 
 ---
 
 ## Future Ideas
 
-- More scales/quantization options
-- MIDI note output
-- Sequencer recording mode
-- Visual scope display
-- Additional synthesis models
-- Macro controls
-- CV output (via Crow)
+- **Per-modulation amount control** (currently fixed at 1.0)
+- **Modulation polarity modes** (unipolar/bipolar/inverted)
+- **Quick actions on column 16** (clear, copy, randomize per voice)
+- **Per-voice base parameters** (octave, detune, volume offsets)
+- **Additional voice types** (different synthesis models)
+- **More quantization scales** for pitch modulation
+- **MIDI note output** for external synths
+- **Visual scope** of register evolution
+- **CV output** via Crow
 
 ---
 

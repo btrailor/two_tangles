@@ -60,16 +60,46 @@ local long_press_active = false
 local pulse_timers = {}
 local pulse_brightness = {}
 
--- Grid layout constants
-local REG_A_OUT = 1
-local REG_A_IN = 2
-local REG_B_OUT = 15
-local REG_B_IN = 16
-local LOGIC_COL_START = 6
-local LOGIC_COL_END = 11
-local WEIGHT_COL = 3
+-- Grid layout constants - NEW DESIGN
+-- Shift registers are now horizontal in center (rows 2-3, 5-6, cols 5-12)
+local REG_A_OUT_ROW = 2
+local REG_A_IN_ROW = 3
+local REG_B_OUT_ROW = 5
+local REG_B_IN_ROW = 6
+local REG_COL_START = 5
+local REG_COL_END = 12
+
+-- Operators/Weights area: 3x3 grid top-right (rows 1-3, cols 14-16)
+-- Switches between operators (normal) and weights (ALT held)
+-- Operators: cols 14-16, rows 1-5 (15 slots for 13 operators)
+local OP_COL_START = 14
+local OP_COL_END = 16
+local OP_ROW_START = 1
+local OP_ROW_END = 5
+-- Weights: cols 1-2, rows 1-8 (16 weight levels)
+local WEIGHT_COL_START = 1
+local WEIGHT_COL_END = 2
+local WEIGHT_ROW_START = 1
+local WEIGHT_ROW_END = 8
+
 local CLOCK_CTRL_ROW = 8
 local TEMPO_TAP_COL = 5
+
+-- Audio Input Sources only (row 1, cols 1-2)
+-- Registers self-seed, only audio input can be patched in
+local SOURCES = {
+  {name = "input_env", col = 8, row = 1},
+  {name = "input_pitch", col = 9, row = 1}
+}
+
+-- Source values (for LED brightness display)
+local source_values = {
+  input_env = 0.0,
+  input_pitch = 0.5,
+  param2 = 0.5,
+  voice1 = 0.5,
+  voice2 = 0.5
+}
 
 -- Clock state
 local clock_running = false
@@ -96,6 +126,12 @@ local freeze_a = false
 local freeze_b = false
 local pattern_length_a = 8
 local pattern_length_b = 8
+
+-- Gate routing
+local gate_route_a1 = true
+local gate_route_a2 = false
+local gate_route_b1 = true
+local gate_route_b2 = false
 local clock_mult_a = 1.0
 local clock_mult_b = 1.0
 local feedback_amount = 1.0
@@ -111,11 +147,62 @@ local input_smoothing = 0.1
 local input_envelope = 0.0
 local input_pitch = 440
 
+-- Patch editing state
+local patch_edit_mode = false
+local patch_edit_data = nil  -- Currently editing patch
+local patch_selection_mode = false
+local patch_selection_list = {}  -- Patches to choose from
+local patch_selection_index = 1
+local patch_selection_pressed = nil  -- {reg, stage} that was pressed
+
 -- Modulation matrix state
 local mod_matrix = {}
 local mod_source_selected = nil
 local mod_dest_selected = nil
 local mod_amount = 0.5
+
+-- Voice modulation page state
+local voice_count = 2
+local voice_mod_matrix = {{}, {}, {}, {}}  -- 4 voices worth of mod routes
+local selected_voice = 0  -- 0-3 for voices 1-4
+local selected_register = 'a'  -- 'a' or 'b'
+
+-- Pitch quantization state
+local voice_quantize_scale = {0, 0, 0, 0}  -- 0=chromatic (off), 1-12=scales
+local voice_root_note = {0, 0, 0, 0}       -- 0-11 for C-B
+
+-- Scale definitions (matching SuperCollider order)
+local SCALE_NAMES = {
+  "Chromatic", "Ionian", "Dorian", "Phrygian",
+  "Lydian", "Mixolydian", "Aeolian", "Locrian",
+  "Pent Major", "Pent Minor", "Blues", "Harm Minor", "Whole Tone"
+}
+
+local NOTE_NAMES = {
+  "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"
+}
+
+-- Voice modulation parameter names (matching SuperCollider)
+local VOICE_PARAMS = {
+  'pitch', 'gate', 'amp', 'waveShape',
+  'filterFreq', 'filterRes', 'fmAmount', 'fmRatio',
+  'pulseWidth', 'subOscMix', 'noiseAmount', 'pan'
+}
+
+local VOICE_PARAM_NAMES = {
+  pitch = 'Pitch',
+  gate = 'Gate',
+  amp = 'Amp',
+  waveShape = 'Wave',
+  filterFreq = 'Filt',
+  filterRes = 'Res',
+  fmAmount = 'FM',
+  fmRatio = 'FMR',
+  pulseWidth = 'PW',
+  subOscMix = 'Sub',
+  noiseAmount = 'Noi',
+  pan = 'Pan'
+}
 
 -- LFO state
 local lfo_rates = {1.0, 2.0, 0.5, 0.25}
@@ -166,20 +253,73 @@ local MOD_DEST_NAMES = {
 
 -- UI pages
 local current_page = 1
-local PAGES = {"Main", "Clock", "Performance", "Audio In", "Mod Matrix"}
+local PAGES = {"Tangles", "Clock", "Performance", "Audio In", "Voice Mod", "Voice Sound"}
+
+-- Voice Sound page state
+local sound_page_voice = 0  -- Currently selected voice for sound editing (0-3)
+local sound_page_param = 1  -- Currently selected parameter (1-based index)
+
+-- Voice sound parameters (editable on page 6)
+local SOUND_PARAMS = {
+  {name = "waveShape", label = "Wave", min = 0, max = 3, step = 1, format = function(v)
+    local waves = {"Sine", "Tri", "Saw", "Pulse"}
+    return waves[math.floor(v) + 1] or "Sine"
+  end},
+  {name = "filterFreq", label = "Filter", min = 100, max = 18000, step = 100, format = function(v)
+    return string.format("%.0f Hz", v)
+  end},
+  {name = "filterRes", label = "Res", min = 0.1, max = 1.0, step = 0.01, format = function(v)
+    return string.format("%.2f", v)
+  end},
+  {name = "fmAmount", label = "FM Amt", min = 0, max = 500, step = 10, format = function(v)
+    return string.format("%.0f", v)
+  end},
+  {name = "fmRatio", label = "FM Ratio", min = 0.5, max = 8, step = 0.1, format = function(v)
+    return string.format("%.1f", v)
+  end},
+  {name = "pulseWidth", label = "PW", min = 0.1, max = 0.9, step = 0.01, format = function(v)
+    return string.format("%.2f", v)
+  end},
+  {name = "subOscMix", label = "Sub", min = 0, max = 1, step = 0.01, format = function(v)
+    return string.format("%.2f", v)
+  end},
+  {name = "noiseAmount", label = "Noise", min = 0, max = 0.3, step = 0.01, format = function(v)
+    return string.format("%.2f", v)
+  end},
+  {name = "amp", label = "Amp", min = 0, max = 1, step = 0.01, format = function(v)
+    return string.format("%.2f", v)
+  end},
+  {name = "pan", label = "Pan", min = -1, max = 1, step = 0.01, format = function(v)
+    return string.format("%.2f", v)
+  end}
+}
+
+-- Cache of current voice parameter values (initialized with defaults)
+local voice_param_cache = {
+  {waveShape=0, filterFreq=2000, filterRes=0.3, fmAmount=0, fmRatio=1, pulseWidth=0.5, subOscMix=0, noiseAmount=0, amp=0.5, pan=0},
+  {waveShape=0, filterFreq=2000, filterRes=0.3, fmAmount=0, fmRatio=1, pulseWidth=0.5, subOscMix=0, noiseAmount=0, amp=0.5, pan=0},
+  {waveShape=0, filterFreq=2000, filterRes=0.3, fmAmount=0, fmRatio=1, pulseWidth=0.5, subOscMix=0, noiseAmount=0, amp=0.5, pan=0},
+  {waveShape=0, filterFreq=2000, filterRes=0.3, fmAmount=0, fmRatio=1, pulseWidth=0.5, subOscMix=0, noiseAmount=0, amp=0.5, pan=0}
+}
+
+-- Patch visualization subpage (page 1a, accessed via ALT from Tangles page)
+local patch_viz_mode = false
+local patch_viz_index = 1  -- Currently selected patch in viz mode
 
 -- Clocks
 local animation_clock
 local screen_refresh_clock
+local random_source_clock
+local clock_button_pulse_clock
 
--- Key timing
-local last_k1_time = 0
+-- Key state
+local k1_held = false
 
 function init()
   params:add_separator("TWO TANGLES")
   
   -- Clock parameters
-  params:add_separator("CLOCK")
+  params:add_separator("TT_CLOCK")
   
   params:add{
     type = "number",
@@ -196,7 +336,7 @@ function init()
   
   params:add{
     type = "option",
-    id = "clock_source",
+    id = "tt_clock_source",
     name = "Clock Source",
     options = {"Internal", "MIDI"},
     default = 1,
@@ -309,7 +449,20 @@ function init()
   
   -- Voice parameters
   params:add_separator("VOICE")
-  
+
+  params:add{
+    type = "option",
+    id = "voice_count",
+    name = "Voice Count",
+    options = {"2", "4"},
+    default = 1,
+    action = function(v)
+      voice_count = v == 1 and 2 or 4
+      engine.voice_count(voice_count)
+      print("Voice count: " .. voice_count)
+    end
+  }
+
   params:add{
     type = "option",
     id = "slew_mode",
@@ -362,7 +515,111 @@ function init()
       engine.global_feedback(v)
     end
   }
+
+  -- Pitch quantization parameters
+  params:add_separator("PITCH QUANTIZATION")
   
+  for v = 0, 3 do  -- 4 voices (0-3)
+    params:add{
+      type = "option",
+      id = "voice_" .. v .. "_scale",
+      name = "Voice " .. (v + 1) .. " Scale",
+      options = SCALE_NAMES,
+      default = 1,  -- Default to Chromatic (off)
+      action = function(value)
+        voice_quantize_scale[v + 1] = value - 1  -- 0-indexed
+        engine.voice_quantize(v, value - 1)
+      end
+    }
+    
+    params:add{
+      type = "option",
+      id = "voice_" .. v .. "_root",
+      name = "Voice " .. (v + 1) .. " Root",
+      options = NOTE_NAMES,
+      default = 1,  -- Default to C
+      action = function(value)
+        voice_root_note[v + 1] = value - 1  -- 0-indexed
+        engine.voice_root(v, value - 1)
+      end
+    }
+  end
+
+  -- External sources
+  params:add_separator("SOURCES")
+
+  params:add{
+    type = "control",
+    id = "source_param1",
+    name = "Param 1",
+    controlspec = controlspec.new(0.0, 1.0, 'lin', 0.01, 0.5, ''),
+    action = function(v)
+      source_values.param1 = v
+      engine.set_source("param1", v)
+      grid_redraw()
+    end
+  }
+
+  params:add{
+    type = "control",
+    id = "source_param2",
+    name = "Param 2",
+    controlspec = controlspec.new(0.0, 1.0, 'lin', 0.01, 0.5, ''),
+    action = function(v)
+      source_values.param2 = v
+      engine.set_source("param2", v)
+      grid_redraw()
+    end
+  }
+
+  params:add{
+    type = "control",
+    id = "source_low",
+    name = "Low Value",
+    controlspec = controlspec.new(0.0, 1.0, 'lin', 0.01, 0.25, ''),
+    action = function(v)
+      source_values.low = v
+      engine.set_source("low", v)
+      grid_redraw()
+    end
+  }
+
+  params:add{
+    type = "control",
+    id = "source_mid",
+    name = "Mid Value",
+    controlspec = controlspec.new(0.0, 1.0, 'lin', 0.01, 0.5, ''),
+    action = function(v)
+      source_values.mid = v
+      engine.set_source("mid", v)
+      grid_redraw()
+    end
+  }
+
+  params:add{
+    type = "control",
+    id = "source_high",
+    name = "High Value",
+    controlspec = controlspec.new(0.0, 1.0, 'lin', 0.01, 0.75, ''),
+    action = function(v)
+      source_values.high = v
+      engine.set_source("high", v)
+      grid_redraw()
+    end
+  }
+
+  params:add{
+    type = "control",
+    id = "source_max",
+    name = "Max Value",
+    controlspec = controlspec.new(0.0, 1.0, 'lin', 0.01, 1.0, ''),
+    action = function(v)
+      source_values.max = v
+      engine.set_source("max", v)
+      grid_redraw()
+    end
+  }
+
   -- Stage probabilities
   for reg=1,2 do
     local reg_name = reg==1 and "A" or "B"
@@ -487,6 +744,79 @@ function init()
     action = function(v)
       pattern_length_b = v
       engine.pattern_length_b(v)
+    end
+  }
+  
+  params:add{
+    type = "option",
+    id = "seed_mode_a",
+    name = "Seed Mode A",
+    options = {"Random", "Low", "Mid", "High", "Chaos"},
+    default = 4,  -- High (drone)
+    action = function(v)
+      engine.seed_mode_a(v - 1)
+    end
+  }
+  
+  params:add{
+    type = "option",
+    id = "seed_mode_b",
+    name = "Seed Mode B",
+    options = {"Random", "Low", "Mid", "High", "Chaos"},
+    default = 4,  -- High (drone)
+    action = function(v)
+      engine.seed_mode_b(v - 1)
+    end
+  }
+  
+  -- Gate routing
+  params:add_separator("GATE ROUTING")
+  
+  params:add{
+    type = "option",
+    id = "gate_route_a1",
+    name = "Register A → Voice 1",
+    options = {"Off", "On"},
+    default = 2,  -- On
+    action = function(v)
+      gate_route_a1 = (v == 2)
+      engine.gate_route_a1(gate_route_a1 and 1 or 0)
+    end
+  }
+  
+  params:add{
+    type = "option",
+    id = "gate_route_a2",
+    name = "Register A → Voice 2",
+    options = {"Off", "On"},
+    default = 1,  -- Off
+    action = function(v)
+      gate_route_a2 = (v == 2)
+      engine.gate_route_a2(gate_route_a2 and 1 or 0)
+    end
+  }
+  
+  params:add{
+    type = "option",
+    id = "gate_route_b1",
+    name = "Register B → Voice 1",
+    options = {"Off", "On"},
+    default = 2,  -- On
+    action = function(v)
+      gate_route_b1 = (v == 2)
+      engine.gate_route_b1(gate_route_b1 and 1 or 0)
+    end
+  }
+  
+  params:add{
+    type = "option",
+    id = "gate_route_b2",
+    name = "Register B → Voice 2",
+    options = {"Off", "On"},
+    default = 1,  -- Off
+    action = function(v)
+      gate_route_b2 = (v == 2)
+      engine.gate_route_b2(gate_route_b2 and 1 or 0)
     end
   }
   
@@ -672,6 +1002,42 @@ function init()
   -- Start clocks
   animation_clock = clock.run(animate_pulses)
   screen_refresh_clock = clock.run(screen_refresh)
+  random_source_clock = clock.run(function()
+    while true do
+      -- Update random source value
+      source_values.random = math.random()
+
+      -- Trigger pulse animation
+      for _, src in ipairs(SOURCES) do
+        if src.name == "random" then
+          trigger_pulse(src.col, src.row)
+          break
+        end
+      end
+
+      if g and g.device then
+        grid_redraw()
+      end
+
+      -- Wait based on tempo (1/8 note rate)
+      local beat_time = 60 / tempo
+      clock.sleep(beat_time / 2)
+    end
+  end)
+
+  -- Clock button pulse (always running for visual workflow indication)
+  clock_button_pulse_clock = clock.run(function()
+    while true do
+      -- Pulse the clock start/stop button at tempo rate
+      trigger_pulse(13, CLOCK_CTRL_ROW)
+
+      local beat_time = 60 / tempo
+      clock.sleep(beat_time)  -- Pulse every beat
+    end
+  end)
+
+  -- Initialize source patch cache
+  rebuild_source_patch_cache()
   
   -- Request initial state
   engine.get_patches()
@@ -874,34 +1240,36 @@ function load_mod_matrix(preset_number)
 end
 
 function osc.event(path, args, from)
-  print("OSC received: " .. path) 
-
   if path == "/tt_state" then
-    print("Register update received!")
     local reg = args[1]
-    
+
     if reg == 'a' then
       for i=1,8 do
         shift_reg_a[i] = args[i+1]
         active_stages_a[i] = args[i+9]
         if active_stages_a[i] == 1 then
-          trigger_pulse(REG_A_OUT, i)
+          trigger_pulse(stage_to_col(i-1), REG_A_OUT_ROW)
         end
       end
       last_step_time_a = util.time()
-      
+
+      -- Trigger pulse for all sources on clock step
+      for _, src in ipairs(SOURCES) do
+        trigger_pulse(src.col, src.row)
+      end
+
     elseif reg == 'b' then
       for i=1,8 do
         shift_reg_b[i] = args[i+1]
         active_stages_b[i] = args[i+9]
-        
+
         if active_stages_b[i] == 1 then
-          trigger_pulse(REG_B_OUT, i)
+          trigger_pulse(stage_to_col(i-1), REG_B_OUT_ROW)
         end
       end
       last_step_time_b = util.time()
     end
-    
+
     grid_redraw()
     
   elseif path == "/patch_data" then
@@ -919,13 +1287,28 @@ function osc.event(path, args, from)
   elseif path == "/tt_pulse" then
     local reg = args[1]
     local stage = args[2]
-    local col = reg == 'a' and REG_A_OUT or REG_B_OUT
-    trigger_pulse(col, stage + 1)
+    local col = stage_to_col(stage)
+    local row = reg == 'a' and REG_A_OUT_ROW or REG_B_OUT_ROW
+    trigger_pulse(col, row)
     
   elseif path == "/tt_input_values" then
     input_envelope = args[1]
     input_pitch = args[2]
-    
+    -- Update source values for display
+    source_values.input_env = input_envelope
+    source_values.input_pitch = input_pitch
+
+  elseif path == "/voice_param_value" then
+    local voice_num = args[1]
+    local param_name = args[2]
+    local value = args[3]
+
+    -- Update the parameter cache
+    if voice_num < voice_count then
+      voice_param_cache[voice_num + 1][param_name] = value
+      redraw()
+    end
+
   elseif path == "/mod_data" then
     local mod = {
       src_type = args[1],
@@ -939,30 +1322,34 @@ function osc.event(path, args, from)
 end
 
 function trigger_pulse(col, row)
-  pulse_timers[col][row] = 1.0
-  pulse_brightness[col][row] = 15
+  if col and row and pulse_timers[col] and pulse_timers[col][row] then
+    pulse_timers[col][row] = 1.0
+    pulse_brightness[col][row] = 1.0  -- Now a 0-1 multiplier, not direct brightness
+  end
 end
 
 function animate_pulses()
   while true do
     clock.sleep(1/30)
-    
+
     for col=1,16 do
       for row=1,8 do
         if pulse_timers[col][row] > 0 then
           pulse_timers[col][row] = pulse_timers[col][row] - 0.1
-          
+
           if pulse_timers[col][row] <= 0 then
             pulse_timers[col][row] = 0
             pulse_brightness[col][row] = 0
           else
-            pulse_brightness[col][row] = math.floor(15 * pulse_timers[col][row])
+            pulse_brightness[col][row] = pulse_timers[col][row]  -- 0.0-1.0 value
           end
         end
       end
     end
     
-    grid_redraw()
+    if g and g.device then
+      grid_redraw()
+    end
   end
 end
 
@@ -975,44 +1362,170 @@ end
 
 function g.key(x, y, z)
   local key_id = x .. "," .. y
-  
+
   if z == 1 then
-    
-    if current_page == 5 and y < 8 then
-      if x <= 8 then
-        local source_index = ((x - 1) * 8) + y - 1
-        if source_index < #MOD_SOURCES then
-          local src = MOD_SOURCES[source_index + 1]
-          mod_source_selected = {type=src.type, index=src.index}
-          print("Source: " .. src.name)
-          grid_redraw()
-          redraw()
-          return
+    -- Handle grid presses during patch selection mode
+    if patch_selection_mode then
+      -- Determine which node was pressed
+      local pressed_node = nil
+      
+      -- Check register A outputs
+      for col = REG_COL_START, REG_COL_END do
+        if x == col and y == REG_A_OUT_ROW then
+          pressed_node = {reg = 'a', stage = col - REG_COL_START, is_output = true}
+          break
         end
       end
       
-      if x >= 9 then
-        local voice
-        if x >= 9 and x <= 10 then
-          voice = 0
-        elseif x >= 11 and x <= 12 then
-          voice = 1
-        else
-          voice = 2
+      -- Check register A inputs
+      if not pressed_node then
+        for col = REG_COL_START, REG_COL_END do
+          if x == col and y == REG_A_IN_ROW then
+            pressed_node = {reg = 'a', stage = col - REG_COL_START, is_output = false}
+            break
+          end
         end
-        
-        if y <= #MOD_DESTINATIONS then
-          local param = MOD_DESTINATIONS[y]
-          mod_dest_selected = {voice=voice, param=param}
-          print("Dest: " .. (voice == 0 and "A" or (voice == 1 and "B" or "Both")) .. ":" .. param)
+      end
+      
+      -- Check register B outputs
+      if not pressed_node then
+        for col = REG_COL_START, REG_COL_END do
+          if x == col and y == REG_B_OUT_ROW then
+            pressed_node = {reg = 'b', stage = col - REG_COL_START, is_output = true}
+            break
+          end
+        end
+      end
+      
+      -- Check register B inputs
+      if not pressed_node then
+        for col = REG_COL_START, REG_COL_END do
+          if x == col and y == REG_B_IN_ROW then
+            pressed_node = {reg = 'b', stage = col - REG_COL_START, is_output = false}
+            break
+          end
+        end
+      end
+      
+      -- Check audio input sources
+      if not pressed_node then
+        for _, src in ipairs(SOURCES) do
+          if x == src.col and y == src.row then
+            pressed_node = {type = "source", stage = src.name == "input_env" and 1 or 2, is_output = true}
+            break
+          end
+        end
+      end
+      
+      -- If a valid node was pressed, find matching patch
+      if pressed_node then
+        for i, patch in ipairs(patch_selection_list) do
+          local match = false
+          
+          if pressed_node.is_output then
+            -- Check if this patch has this source
+            if pressed_node.type == "source" then
+              if patch.src_type == "source" and patch.src_stage == pressed_node.stage then
+                match = true
+              end
+            else
+              if patch.src_reg == pressed_node.reg and patch.src_stage == pressed_node.stage then
+                match = true
+              end
+            end
+          else
+            -- Check if this patch has this destination
+            if patch.dst_reg == pressed_node.reg and patch.dst_stage == pressed_node.stage then
+              match = true
+            end
+          end
+          
+          if match then
+            patch_selection_index = i
+            exit_patch_selection_mode()
+            enter_patch_edit_mode(patch)
+            redraw()
+            return
+          end
+        end
+      end
+      
+      return
+    end
+
+    -- Page 5: Voice Modulation Matrix
+    if current_page == 5 and y <= 8 then
+      -- Register selection buttons (column 14, rows 1-2)
+      if x == 14 then
+        if y == 1 then
+          selected_register = 'a'
+          print("Selected register: A")
+          grid_redraw()
+          redraw()
+          return
+        elseif y == 2 then
+          selected_register = 'b'
+          print("Selected register: B")
           grid_redraw()
           redraw()
           return
         end
       end
+
+      -- Voice selection buttons (column 15, rows 1-4)
+      if x == 15 then
+        if y <= voice_count then
+          selected_voice = y - 1  -- 0-indexed
+          print("Selected voice: " .. (selected_voice + 1))
+          grid_redraw()
+          redraw()
+          return
+        end
+      end
+
+      -- Columns 13, 16: Reserved for future features
+
+      -- Modulation matrix (columns 1-12 for params, rows 1-8 for stages)
+      if x >= 1 and x <= 12 and y >= 1 and y <= 8 then
+        local param = VOICE_PARAMS[x]
+        local stage = y - 1  -- 0-indexed
+        toggle_voice_mod(selected_voice, selected_register, stage, param)
+        grid_redraw()
+        redraw()
+        return
+      end
     end
-    
+
+    -- Page 6: Voice Sound (Oscillator Control)
+    if current_page == 6 then
+      -- Voice selection buttons (column 15, rows 1-4)
+      if x == 15 and y >= 1 and y <= voice_count then
+        sound_page_voice = y - 1  -- 0-indexed
+        print("Selected voice: " .. (sound_page_voice + 1))
+        grid_redraw()
+        redraw()
+        return
+      end
+    end
+
     if y == CLOCK_CTRL_ROW then
+      -- Gate routing toggles
+      if x == 2 then
+        gate_route_a2 = not gate_route_a2
+        params:set("gate_route_a2", gate_route_a2 and 2 or 1)
+        print("A→Voice 2: " .. (gate_route_a2 and "ON" or "OFF"))
+        grid_redraw()
+        return
+      end
+      
+      if x == 3 then
+        gate_route_a1 = not gate_route_a1
+        params:set("gate_route_a1", gate_route_a1 and 2 or 1)
+        print("A→Voice 1: " .. (gate_route_a1 and "ON" or "OFF"))
+        grid_redraw()
+        return
+      end
+      
       if x == 4 then
         clock_a_enabled = not clock_a_enabled
         params:set("clock_a_enable", clock_a_enabled and 2 or 1)
@@ -1085,19 +1598,27 @@ function g.key(x, y, z)
       end
       
       if x == 14 then
+        gate_route_b1 = not gate_route_b1
+        params:set("gate_route_b1", gate_route_b1 and 2 or 1)
+        print("B→Voice 1: " .. (gate_route_b1 and "ON" or "OFF"))
+        grid_redraw()
+        return
+      end
+      
+      if x == 15 then
+        gate_route_b2 = not gate_route_b2
+        params:set("gate_route_b2", gate_route_b2 and 2 or 1)
+        print("B→Voice 2: " .. (gate_route_b2 and "ON" or "OFF"))
+        grid_redraw()
+        return
+      end
+      
+      if x == 16 then
         engine.reset()
         beat_count = 0
         print("Clock reset")
         grid_redraw()
         redraw()
-        return
-      end
-      
-      if x == 16 then
-        reset_on_downbeat = not reset_on_downbeat
-        params:set("reset_downbeat", reset_on_downbeat and 2 or 1)
-        print("Reset on downbeat: " .. (reset_on_downbeat and "ON" or "OFF"))
-        grid_redraw()
         return
       end
       
@@ -1131,227 +1652,400 @@ function g.key(x, y, z)
 end
 
 function handle_short_press(x, y)
-  if x >= LOGIC_COL_START and x <= LOGIC_COL_END then
-    local logic_index = ((x - LOGIC_COL_START) * 8) + (y - 1)
+  -- Operator selection (right side: cols 14-16, rows 1-5) - only active during patch edit
+  if patch_edit_mode and x >= OP_COL_START and x <= OP_COL_END and
+     y >= OP_ROW_START and y <= OP_ROW_END then
     
-    if logic_index < #LOGIC_OPS then
-      selected_logic = LOGIC_OPS[logic_index + 1].id
+    local op_index = ((y - OP_ROW_START) * 3) + (x - OP_COL_START)
+    
+    if op_index < #LOGIC_OPS then
+      selected_logic = LOGIC_OPS[op_index + 1].id
       logic_mode = true
-      print("Logic selected: " .. LOGIC_OPS[logic_index + 1].name)
+      print("Logic selected: " .. LOGIC_OPS[op_index + 1].name)
       
-      if edit_mode and selected_patch then
-        engine.patch_logic(
-          selected_patch.src_reg,
-          selected_patch.src_stage,
-          selected_patch.dst_reg,
-          selected_patch.dst_stage,
-          selected_logic
-        )
-        selected_patch.logic = selected_logic
-        print("Patch logic updated")
+      -- Update patch edit screen
+      if patch_edit_data then
+        patch_edit_data.logic = selected_logic
+        if not patch_edit_data.is_creating then
+          -- Update existing patch
+          engine.patch_logic(
+            patch_edit_data.src_reg,
+            patch_edit_data.src_stage,
+            patch_edit_data.dst_reg,
+            patch_edit_data.dst_stage,
+            selected_logic
+          )
+          -- Update in patches table
+          for i, p in ipairs(patches) do
+            if p.src_reg == patch_edit_data.src_reg and p.src_stage == patch_edit_data.src_stage and
+               p.dst_reg == patch_edit_data.dst_reg and p.dst_stage == patch_edit_data.dst_stage then
+              p.logic = selected_logic
+              break
+            end
+          end
+        end
       end
-      
-      grid_redraw()
-      redraw()
-      return
-    end
-  end
-  
-  if x == REG_A_OUT and y <= 8 then
-    handle_stage_press('a', y-1, 'out')
-    return
-  end
-  
-  if x == REG_A_IN and y <= 8 then
-    handle_stage_press('a', y-1, 'in')
-    return
-  end
-  
-  if x == REG_B_OUT and y <= 8 then
-    handle_stage_press('b', y-1, 'out')
-    return
-  end
-  
-  if x == REG_B_IN and y <= 8 then
-    handle_stage_press('b', y-1, 'in')
-    return
-  end
-  
-  if x == WEIGHT_COL and y <= 8 then
-    patch_weight = (9 - y) / 8.0
-    
-    if edit_mode and selected_patch then
-      engine.patch_weight(
-        selected_patch.src_reg,
-        selected_patch.src_stage,
-        selected_patch.dst_reg,
-        selected_patch.dst_stage,
-        patch_weight
-      )
-      selected_patch.weight = patch_weight
-      print("Patch weight updated: " .. string.format("%.2f", patch_weight))
-    else
-      print("Patch weight set: " .. string.format("%.2f", patch_weight))
     end
     
     grid_redraw()
     redraw()
     return
+  end
+  
+  -- Weight selection (left side: cols 1-2, rows 1-8) - only active during patch edit
+  if patch_edit_mode and x >= WEIGHT_COL_START and x <= WEIGHT_COL_END and
+     y >= WEIGHT_ROW_START and y <= WEIGHT_ROW_END then
+    
+    local weight_index = ((y - WEIGHT_ROW_START) * 2) + (x - WEIGHT_COL_START)
+    patch_weight = (weight_index + 1) / 16.0
+    
+    -- Update patch edit screen
+    if patch_edit_data then
+      patch_edit_data.weight = patch_weight
+      if not patch_edit_data.is_creating then
+        -- Update existing patch
+        engine.patch_weight(
+          patch_edit_data.src_reg,
+          patch_edit_data.src_stage,
+          patch_edit_data.dst_reg,
+          patch_edit_data.dst_stage,
+          patch_weight
+        )
+        -- Update in patches table
+        for i, p in ipairs(patches) do
+          if p.src_reg == patch_edit_data.src_reg and p.src_stage == patch_edit_data.src_stage and
+             p.dst_reg == patch_edit_data.dst_reg and p.dst_stage == patch_edit_data.dst_stage then
+            p.weight = patch_weight
+            break
+          end
+        end
+      end
+      print("Patch weight: " .. string.format("%.2f", patch_weight))
+    end
+    
+    grid_redraw()
+    redraw()
+    return
+  end
+
+  -- Audio input sources (row 1, cols 8-9)
+  for i, src in ipairs(SOURCES) do
+    if x == src.col and y == src.row then
+      -- If viewing an existing patch, close it first
+      if patch_edit_mode or patch_selection_mode then
+        exit_patch_edit_mode()
+        exit_patch_selection_mode()
+      end
+      -- Start patch from this source
+      start_patch_from_source(src.name, i)
+      return
+    end
+  end
+
+  -- NEW: Horizontal register layout (rows 3-6, cols 5-12)
+  local stage = col_to_stage(x)
+  if stage then
+    -- Register A output (row 3)
+    if y == REG_A_OUT_ROW then
+      handle_stage_press('a', stage, 'out')
+      return
+    end
+    
+    -- Register A input (row 4)
+    if y == REG_A_IN_ROW then
+      handle_stage_press('a', stage, 'in')
+      return
+    end
+    
+    -- Register B output (row 5)
+    if y == REG_B_OUT_ROW then
+      handle_stage_press('b', stage, 'out')
+      return
+    end
+    
+    -- Register B input (row 6)
+    if y == REG_B_IN_ROW then
+      handle_stage_press('b', stage, 'in')
+      return
+    end
   end
 end
 
 function handle_long_press(x, y)
   print("Long press detected at " .. x .. "," .. y)
   
-  if (x == REG_A_OUT or x == REG_A_IN or x == REG_B_OUT or x == REG_B_IN) and y <= 8 then
-    local reg = (x == REG_A_OUT or x == REG_A_IN) and 'a' or 'b'
-    local stage = y - 1
-    local is_output = (x == REG_A_OUT or x == REG_B_OUT)
+  -- NEW: Horizontal register layout
+  local stage = col_to_stage(x)
+  if stage then
+    local reg, is_output
     
-    local relevant_patches = {}
-    for _, patch in ipairs(patches) do
-      if is_output then
-        if patch.src_reg == reg and patch.src_stage == stage then
-          table.insert(relevant_patches, patch)
-        end
-      else
-        if patch.dst_reg == reg and patch.dst_stage == stage then
-          table.insert(relevant_patches, patch)
-        end
-      end
+    if y == REG_A_OUT_ROW then
+      reg = 'a'
+      is_output = true
+    elseif y == REG_A_IN_ROW then
+      reg = 'a'
+      is_output = false
+    elseif y == REG_B_OUT_ROW then
+      reg = 'b'
+      is_output = true
+    elseif y == REG_B_IN_ROW then
+      reg = 'b'
+      is_output = false
     end
     
-    if #relevant_patches > 0 then
-      selected_patch = relevant_patches[1]
-      edit_mode = true
+    if reg then
+      -- Find all patches connected to this node
+      local relevant_patches = {}
+      for _, patch in ipairs(patches) do
+        if is_output then
+          if patch.src_reg == reg and patch.src_stage == stage then
+            table.insert(relevant_patches, patch)
+          end
+        else
+          if patch.dst_reg == reg and patch.dst_stage == stage then
+            table.insert(relevant_patches, patch)
+          end
+        end
+      end
       
-      selected_logic = selected_patch.logic
-      patch_weight = selected_patch.weight
-      
-      print("Editing patch: " .. selected_patch.src_reg .. "[" .. selected_patch.src_stage .. "] -> " ..
-            selected_patch.dst_reg .. "[" .. selected_patch.dst_stage .. "]")
-      
-      local src_col = selected_patch.src_reg == 'a' and REG_A_OUT or REG_B_OUT
-      local dst_col = selected_patch.dst_reg == 'a' and REG_A_IN or REG_B_IN
-      trigger_pulse(src_col, selected_patch.src_stage + 1)
-      trigger_pulse(dst_col, selected_patch.dst_stage + 1)
-      
-      grid_redraw()
-      redraw()
+      if #relevant_patches == 0 then
+        print("No patches at this node")
+        return
+      elseif #relevant_patches == 1 then
+        -- Single patch - go directly to edit mode
+        enter_patch_edit_mode(relevant_patches[1])
+      else
+        -- Multiple patches - enter selection mode
+        enter_patch_selection_mode(relevant_patches, {reg=reg, stage=stage, is_output=is_output})
+      end
     end
   end
 end
 
-function handle_stage_press(reg, stage, direction)
-  if edit_mode and selected_patch then
-    local matches = false
-    if direction == 'out' then
-      matches = (selected_patch.src_reg == reg and selected_patch.src_stage == stage)
-    else
-      matches = (selected_patch.dst_reg == reg and selected_patch.dst_stage == stage)
-    end
-    
-    if matches then
-      delete_patch(selected_patch)
-      edit_mode = false
-      selected_patch = nil
-      return
-    end
-  end
+function enter_patch_edit_mode(patch)
+  patch_edit_mode = true
+  patch_selection_mode = false
+  patch_edit_data = patch
+  selected_logic = patch.logic
+  patch_weight = patch.weight
   
-  if patch_mode then
-    if direction == 'in' and patch_source then
-      complete_patch(reg, stage)
-    elseif direction == 'out' and patch_source then
-      patch_source = {reg=reg, stage=stage}
-      print("Patch source changed: " .. reg .. " stage " .. stage)
-    end
-  else
-    if direction == 'out' then
+  print("Editing patch: " .. patch.src_reg .. "[" .. patch.src_stage .. "] -> " ..
+        patch.dst_reg .. "[" .. patch.dst_stage .. "]")
+  
+  grid_redraw()
+  redraw()
+end
+
+function enter_patch_selection_mode(patch_list, pressed_node)
+  patch_selection_mode = true
+  patch_selection_list = patch_list
+  patch_selection_index = 1
+  patch_selection_pressed = pressed_node
+  
+  print("Multiple patches found - select one")
+  grid_redraw()
+  redraw()
+end
+
+function exit_patch_edit_mode()
+  patch_edit_mode = false
+  patch_edit_data = nil
+  grid_redraw()
+  redraw()
+end
+
+function exit_patch_selection_mode()
+  patch_selection_mode = false
+  patch_selection_list = {}
+  patch_selection_index = 1
+  patch_selection_pressed = nil
+  grid_redraw()
+  redraw()
+end
+
+function handle_stage_press(reg, stage, direction)
+  -- If currently creating a patch (edit screen showing with is_creating = true)
+  if patch_edit_mode and patch_edit_data and patch_edit_data.is_creating then
+    if direction == 'in' then
+      -- Complete the patch
+      if patch_edit_data.src_type == "source" then
+        complete_patch_source_to_stage(patch_edit_data.src_reg, reg, stage)
+      else
+        complete_patch(reg, stage)
+      end
+    elseif direction == 'out' then
+      -- Change the source (restart patch creation)
       start_patch(reg, stage)
     end
+    return
+  end
+  
+  -- If viewing an existing patch, close it first
+  if patch_edit_mode or patch_selection_mode then
+    exit_patch_edit_mode()
+    exit_patch_selection_mode()
+    -- Don't return - continue to start new patch
+  end
+  
+  -- Start new patch from output
+  if direction == 'out' then
+    start_patch(reg, stage)
   end
   
   grid_redraw()
   redraw()
 end
 
+-- Helper to get register stage from column (NEW horizontal layout)
+function col_to_stage(col)
+  if col >= REG_COL_START and col <= REG_COL_END then
+    return col - REG_COL_START
+  end
+  return nil
+end
+
+-- Helper to get column from stage (NEW horizontal layout)
+function stage_to_col(stage)
+  return REG_COL_START + stage
+end
+
 function start_patch(reg, stage)
-  patch_mode = true
-  patch_source = {reg=reg, stage=stage}
-  edit_mode = false
-  selected_patch = nil
+  -- Enter patch edit mode with temporary patch data
+  patch_edit_data = {
+    src_reg = reg,
+    src_stage = stage,
+    dst_reg = "?",
+    dst_stage = "?",
+    logic = selected_logic,
+    weight = patch_weight,
+    is_creating = true
+  }
+  patch_edit_mode = true
+  
   print("Patch started: " .. reg .. " stage " .. stage)
   grid_redraw()
   redraw()
 end
 
 function complete_patch(dst_reg, dst_stage)
-  if patch_source then
-    local existing_patch = find_patch(
-      patch_source.reg, 
-      patch_source.stage, 
-      dst_reg, 
-      dst_stage
-    )
-    
-    if existing_patch then
-      print("Updating existing patch...")
-      engine.patch_logic(
-        patch_source.reg,
-        patch_source.stage,
-        dst_reg,
-        dst_stage,
-        selected_logic
-      )
-      engine.patch_weight(
-        patch_source.reg,
-        patch_source.stage,
-        dst_reg,
-        dst_stage,
-        patch_weight
-      )
-      
-      existing_patch.logic = selected_logic
-      existing_patch.weight = patch_weight
-      
-    else
-      engine.add_patch(
-        patch_source.reg,
-        patch_source.stage,
-        dst_reg,
-        dst_stage,
-        selected_logic,
-        patch_weight
-      )
-      
-      table.insert(patches, {
-        src_reg = patch_source.reg,
-        src_stage = patch_source.stage,
-        dst_reg = dst_reg,
-        dst_stage = dst_stage,
-        logic = selected_logic,
-        weight = patch_weight
-      })
-    end
-    
-    print("Patch: " .. patch_source.reg .. "[" .. patch_source.stage .. "]" .. 
-          " -> " .. dst_reg .. "[" .. dst_stage .. "]" ..
-          " [" .. get_logic_name(selected_logic) .. "]" ..
-          " w:" .. string.format("%.2f", patch_weight))
-    
-    local src_col = patch_source.reg == 'a' and REG_A_OUT or REG_B_OUT
-    local dst_col = dst_reg == 'a' and REG_A_IN or REG_B_IN
-    trigger_pulse(src_col, patch_source.stage + 1)
-    trigger_pulse(dst_col, dst_stage + 1)
-    
-    patch_mode = false
-    patch_source = nil
-    logic_mode = false
-    
-    grid_redraw()
-    redraw()
+  if not patch_edit_data or not patch_edit_data.is_creating then
+    return
   end
+  
+  local src_reg = patch_edit_data.src_reg
+  local src_stage = patch_edit_data.src_stage
+  
+  -- Check if patch already exists
+  local existing_patch = find_patch(src_reg, src_stage, dst_reg, dst_stage)
+  
+  if existing_patch then
+    print("Updating existing patch...")
+    engine.patch_logic(src_reg, src_stage, dst_reg, dst_stage, patch_edit_data.logic)
+    engine.patch_weight(src_reg, src_stage, dst_reg, dst_stage, patch_edit_data.weight)
+    
+    existing_patch.logic = patch_edit_data.logic
+    existing_patch.weight = patch_edit_data.weight
+  else
+    local new_patch = {
+      src_reg = src_reg,
+      src_stage = src_stage,
+      dst_reg = dst_reg,
+      dst_stage = dst_stage,
+      logic = patch_edit_data.logic,
+      weight = patch_edit_data.weight
+    }
+    
+    engine.add_patch(src_reg, src_stage, dst_reg, dst_stage, new_patch.logic, new_patch.weight)
+    table.insert(patches, new_patch)
+    existing_patch = new_patch
+  end
+  
+  print("Patch: " .. src_reg .. "[" .. src_stage .. "]" .. 
+        " -> " .. dst_reg .. "[" .. dst_stage .. "]" ..
+        " [" .. get_logic_name(patch_edit_data.logic) .. "]" ..
+        " w:" .. string.format("%.2f", patch_edit_data.weight))
+  
+  -- Rebuild source patch cache
+  rebuild_source_patch_cache()
+  
+  local src_col = stage_to_col(src_stage)
+  local src_row = src_reg == 'a' and REG_A_OUT_ROW or REG_B_OUT_ROW
+  local dst_col = stage_to_col(dst_stage)
+  local dst_row = dst_reg == 'a' and REG_A_IN_ROW or REG_B_IN_ROW
+  trigger_pulse(src_col, src_row)
+  trigger_pulse(dst_col, dst_row)
+  
+  -- Update edit screen with completed patch
+  patch_edit_data = existing_patch
+  patch_edit_data.is_creating = false
+  
+  grid_redraw()
+  redraw()
+end
+
+function start_patch_from_source(source_name, row)
+  -- Enter patch edit mode with temporary patch data
+  patch_edit_data = {
+    src_reg = source_name,
+    src_stage = 0,
+    src_type = "source",
+    dst_reg = "?",
+    dst_stage = "?",
+    logic = selected_logic,
+    weight = patch_weight,
+    is_creating = true
+  }
+  patch_edit_mode = true
+  
+  print("Patch started from source: " .. source_name)
+  grid_redraw()
+  redraw()
+end
+
+function complete_patch_source_to_stage(source_name, dst_reg, dst_stage)
+  if not patch_edit_data or not patch_edit_data.is_creating then
+    return
+  end
+  
+  local new_patch = {
+    src_reg = source_name,
+    src_stage = 0,
+    dst_reg = dst_reg,
+    dst_stage = dst_stage,
+    logic = patch_edit_data.logic,
+    weight = patch_edit_data.weight,
+    src_type = "source"
+  }
+  
+  engine.add_patch(source_name, 0, dst_reg, dst_stage, new_patch.logic, new_patch.weight)
+  table.insert(patches, new_patch)
+
+  print("Patch: " .. source_name .. " -> " .. dst_reg .. "[" .. dst_stage .. "]" ..
+        " [" .. get_logic_name(new_patch.logic) .. "]" ..
+        " w:" .. string.format("%.2f", new_patch.weight))
+
+  -- Rebuild source patch cache
+  rebuild_source_patch_cache()
+
+  local dst_col = stage_to_col(dst_stage)
+  local dst_row = dst_reg == 'a' and REG_A_IN_ROW or REG_B_IN_ROW
+
+  -- Find source position and trigger pulse
+  for _, src in ipairs(SOURCES) do
+    if src.name == source_name then
+      trigger_pulse(src.col, src.row)
+      break
+    end
+  end
+
+  trigger_pulse(dst_col, dst_row)
+
+  -- Update edit screen with completed patch
+  patch_edit_data = new_patch
+  patch_edit_data.is_creating = false
+
+  grid_redraw()
+  redraw()
 end
 
 function delete_patch(patch)
@@ -1370,6 +2064,9 @@ function delete_patch(patch)
       break
     end
   end
+  
+  -- Rebuild source patch cache
+  rebuild_source_patch_cache()
   
   grid_redraw()
   redraw()
@@ -1394,6 +2091,76 @@ function get_logic_name(logic_id)
     end
   end
   return "?"
+end
+
+function get_logic_description(logic_id)
+  local descriptions = {
+    [0] = "Pass input directly",
+    [1] = "Logical AND operation",
+    [2] = "Logical OR operation", 
+    [3] = "Logical XOR (difference)",
+    [4] = "Add values",
+    [5] = "Multiply values",
+    [6] = "Subtract destination from source",
+    [7] = "Minimum of two values",
+    [8] = "Maximum of two values",
+    [9] = "Average of two values",
+    [10] = "Invert destination",
+    [11] = "Source modulo destination",
+    [12] = "Threshold comparison"
+  }
+  return descriptions[logic_id] or "Unknown operation"
+end
+
+-- Voice modulation functions
+function toggle_voice_mod(voice_num, src_reg, src_stage, param)
+  -- Check if this modulation already exists
+  local existing = find_voice_mod(voice_num, src_reg, src_stage, param)
+
+  if existing then
+    -- Remove existing modulation
+    remove_voice_mod(voice_num, src_reg, src_stage, param)
+    print("Removed: V" .. (voice_num + 1) .. " " .. src_reg:upper() .. src_stage .. " -> " .. param)
+  else
+    -- Add new modulation with default amount
+    add_voice_mod(voice_num, src_reg, src_stage, param, 1.0)
+    print("Added: V" .. (voice_num + 1) .. " " .. src_reg:upper() .. src_stage .. " -> " .. param)
+  end
+end
+
+function add_voice_mod(voice_num, src_reg, src_stage, param, amount)
+  -- Add to local table
+  table.insert(voice_mod_matrix[voice_num + 1], {
+    src_reg = src_reg,
+    src_stage = src_stage,
+    param = param,
+    amount = amount
+  })
+
+  -- Send to engine
+  engine.add_voice_mod(voice_num, src_reg, src_stage, param, amount)
+end
+
+function remove_voice_mod(voice_num, src_reg, src_stage, param)
+  -- Remove from local table
+  for i = #voice_mod_matrix[voice_num + 1], 1, -1 do
+    local mod = voice_mod_matrix[voice_num + 1][i]
+    if mod.src_reg == src_reg and mod.src_stage == src_stage and mod.param == param then
+      table.remove(voice_mod_matrix[voice_num + 1], i)
+    end
+  end
+
+  -- Send to engine
+  engine.remove_voice_mod(voice_num, src_reg, src_stage, param)
+end
+
+function find_voice_mod(voice_num, src_reg, src_stage, param)
+  for _, mod in ipairs(voice_mod_matrix[voice_num + 1]) do
+    if mod.src_reg == src_reg and mod.src_stage == src_stage and mod.param == param then
+      return mod
+    end
+  end
+  return nil
 end
 
 function add_modulation(src_type, src_index, dest_voice, dest_param, amount)
@@ -1484,27 +2251,62 @@ end
 
 function key(n, z)
   if n == 1 then
-    if z == 1 then
-      last_k1_time = util.time()
-    else
-      local hold_time = util.time() - last_k1_time
-      if hold_time > 0.5 then
-        current_page = current_page % #PAGES + 1
-        print("Page: " .. PAGES[current_page])
+    -- Track K1 held state
+    k1_held = (z == 1)
+    -- K1 is used as a hold modifier for alternate encoder functions
+    -- Clock start/stop is handled by grid buttons
+
+  elseif n == 2 and z == 1 then
+    -- Patch edit mode: K2 deletes patch or cancels creation
+    if patch_edit_mode and patch_edit_data then
+      local patch = patch_edit_data
+      
+      if patch.is_creating then
+        -- Cancel patch creation
+        print("Patch creation cancelled")
+        patch_mode = false
+        patch_source = nil
+        logic_mode = false
       else
-        clock_running = not clock_running
-        if clock_running then
-          engine.start()
-          print("Clock started")
-        else
-          engine.stop()
-          print("Clock stopped")
+        -- Delete existing patch
+        engine.patch_remove(
+          patch.src_reg,
+          patch.src_stage,
+          patch.dst_reg,
+          patch.dst_stage
+        )
+        -- Remove from patches table
+        for i = #patches, 1, -1 do
+          local p = patches[i]
+          if p.src_reg == patch.src_reg and p.src_stage == patch.src_stage and
+             p.dst_reg == patch.dst_reg and p.dst_stage == patch.dst_stage then
+            table.remove(patches, i)
+            break
+          end
         end
+        -- Rebuild source patch cache
+        rebuild_source_patch_cache()
+        print("Patch deleted")
       end
+      
+      exit_patch_edit_mode()
+      grid_redraw()
       redraw()
+      return
     end
     
-  elseif n == 2 and z == 1 then
+    -- Patch selection mode: K2 cancels
+    if patch_selection_mode then
+      exit_patch_selection_mode()
+      redraw()
+      return
+    end
+    
+    -- In patch viz mode, K2 does nothing (reserved for future use)
+    if current_page == 1 and patch_viz_mode then
+      return
+    end
+
     if current_page == 3 then
       if mute_a and mute_b then
         mute_a = false
@@ -1520,22 +2322,38 @@ function key(n, z)
       params:set("mute_a", mute_a and 2 or 1)
       params:set("mute_b", mute_b and 2 or 1)
     else
-      if edit_mode then
-        edit_mode = false
-        selected_patch = nil
-      elseif patch_mode then
-        patch_mode = false
-        patch_source = nil
-        logic_mode = false
-      else
-        engine.reset()
-        beat_count = 0
-      end
+      -- K2 on other pages resets
+      engine.reset()
+      beat_count = 0
     end
     grid_redraw()
     redraw()
     
   elseif n == 3 and z == 1 then
+    -- Patch edit mode: K3 saves and exits (but not during creation)
+    if patch_edit_mode then
+      if patch_edit_data and patch_edit_data.is_creating then
+        -- During creation, K3 does nothing (wait for destination selection)
+        print("Select destination on grid")
+        return
+      else
+        -- Existing patch, save and exit
+        print("Patch saved")
+        exit_patch_edit_mode()
+        redraw()
+        return
+      end
+    end
+    
+    -- Patch selection mode: K3 selects patch and enters edit mode
+    if patch_selection_mode then
+      local selected_patch = patch_selection_list[patch_selection_index]
+      exit_patch_selection_mode()
+      enter_patch_edit_mode(selected_patch)
+      redraw()
+      return
+    end
+    
     if current_page == 3 then
       if freeze_a and freeze_b then
         freeze_a = false
@@ -1583,7 +2401,16 @@ function key(n, z)
         end
       end
     else
-      if edit_mode and selected_patch then
+      -- K3: Delete patch in patch viz mode, or delete selected patch in edit mode
+      if current_page == 1 and patch_viz_mode and #patches > 0 then
+        local patch = patches[patch_viz_index]
+        delete_patch(patch)
+        -- Adjust index if needed
+        if patch_viz_index > #patches then
+          patch_viz_index = math.max(1, #patches)
+        end
+        print("Patch deleted")
+      elseif edit_mode and selected_patch then
         delete_patch(selected_patch)
         edit_mode = false
         selected_patch = nil
@@ -1594,15 +2421,147 @@ function key(n, z)
   end
 end
 
+-- Initialize Voice Sound page by requesting current parameter values from engine
+function init_voice_sound_page()
+  -- Request current values for all voices and all parameters
+  for v = 0, voice_count - 1 do
+    for _, param_def in ipairs(SOUND_PARAMS) do
+      engine.get_voice_param(v, param_def.name)
+    end
+  end
+end
+
 function enc(n, d)
+  -- Patch edit mode encoders
+  if patch_edit_mode and patch_edit_data then
+    if n == 2 then
+      -- E2: Change logic operator
+      local patch = patch_edit_data
+      local new_logic = util.clamp(patch.logic + d, 0, #LOGIC_OPS - 1)
+      engine.patch_logic(
+        patch.src_reg,
+        patch.src_stage,
+        patch.dst_reg,
+        patch.dst_stage,
+        new_logic
+      )
+      patch.logic = new_logic
+      -- Update in patches table
+      for i, p in ipairs(patches) do
+        if p.src_reg == patch.src_reg and p.src_stage == patch.src_stage and
+           p.dst_reg == patch.dst_reg and p.dst_stage == patch.dst_stage then
+          p.logic = new_logic
+          break
+        end
+      end
+      redraw()
+      return
+    elseif n == 3 then
+      -- E3: Change weight
+      local patch = patch_edit_data
+      local new_weight = util.clamp(patch.weight + (d * 0.05), 0.0, 1.0)
+      engine.patch_weight(
+        patch.src_reg,
+        patch.src_stage,
+        patch.dst_reg,
+        patch.dst_stage,
+        new_weight
+      )
+      patch.weight = new_weight
+      -- Update in patches table
+      for i, p in ipairs(patches) do
+        if p.src_reg == patch.src_reg and p.src_stage == patch.src_stage and
+           p.dst_reg == patch.dst_reg and p.dst_stage == patch.dst_stage then
+          p.weight = new_weight
+          break
+        end
+      end
+      redraw()
+      return
+    end
+  end
+  
+  -- Patch selection mode encoder
+  if patch_selection_mode then
+    if n == 2 then
+      -- E2: Navigate patch list
+      patch_selection_index = util.clamp(patch_selection_index + d, 1, #patch_selection_list)
+      redraw()
+      return
+    end
+  end
+  
+  -- E1 with K1 held = Tempo control (Page 1 only)
+  if n == 1 and k1_held and current_page == 1 then
+    tempo = util.clamp(tempo + d, 20, 300)
+    params:set("tempo", tempo)
+    redraw()
+    return
+  end
+
+  -- E1 handling: patch selection in viz mode, otherwise page navigation
+  if n == 1 then
+    -- In patch viz mode, E1 selects patches instead of changing pages
+    if current_page == 1 and patch_viz_mode then
+      patch_viz_index = util.clamp(patch_viz_index + d, 1, #patches)
+      redraw()
+      return
+    else
+      -- Normal page navigation
+      local old_page = current_page
+      current_page = util.clamp(current_page + d, 1, #PAGES)
+      patch_viz_mode = false  -- Exit patch viz when changing pages
+
+      -- Initialize Voice Sound page when entering it
+      if current_page == 6 and old_page ~= 6 then
+        init_voice_sound_page()
+      end
+
+      print("Page: " .. PAGES[current_page])
+      grid_redraw()
+      redraw()
+      return
+    end
+  end
+
   if current_page == 1 then
-    if n == 1 then
-      tempo = util.clamp(tempo + d, 20, 300)
-      params:set("tempo", tempo)
-      
-    elseif n == 2 then
-      local k1_held = (util.time() - last_k1_time) < 0.3
-      
+    -- Patch Visualization Mode encoders (E2 and E3)
+    if patch_viz_mode then
+      if n == 2 and #patches > 0 then
+        -- E2: Change logic operator
+        local patch = patches[patch_viz_index]
+        local new_logic = util.clamp(patch.logic + d, 0, #LOGIC_OPS - 1)
+        engine.patch_logic(
+          patch.src_reg,
+          patch.src_stage,
+          patch.dst_reg,
+          patch.dst_stage,
+          new_logic
+        )
+        patch.logic = new_logic
+        print("Logic: " .. get_logic_name(new_logic))
+        redraw()
+        return
+      elseif n == 3 and #patches > 0 then
+        -- E3: Change weight
+        local patch = patches[patch_viz_index]
+        local new_weight = util.clamp(patch.weight + (d * 0.05), 0.0, 1.0)
+        engine.patch_weight(
+          patch.src_reg,
+          patch.src_stage,
+          patch.dst_reg,
+          patch.dst_stage,
+          new_weight
+        )
+        patch.weight = new_weight
+        print("Weight: " .. string.format("%.2f", new_weight))
+        redraw()
+        return
+      end
+    end
+
+    -- Normal Tangles mode encoders
+    if n == 2 then
       if k1_held then
         local divs = {1, 2, 3, 4, 6, 8, 12, 16, 24, 32}
         local current_index = tab.key(divs, clock_div_a) or 1
@@ -1613,7 +2572,7 @@ function enc(n, d)
       else
         selected_logic = util.clamp(selected_logic + d, 0, #LOGIC_OPS - 1)
         logic_mode = true
-        
+
         if edit_mode and selected_patch then
           engine.patch_logic(
             selected_patch.src_reg,
@@ -1624,13 +2583,11 @@ function enc(n, d)
           )
           selected_patch.logic = selected_logic
         end
-        
+
         print("Logic: " .. get_logic_name(selected_logic))
       end
-      
+
     elseif n == 3 then
-      local k1_held = (util.time() - last_k1_time) < 0.3
-      
       if k1_held then
         local divs = {1, 2, 3, 4, 6, 8, 12, 16, 24, 32}
         local current_index = tab.key(divs, clock_div_b) or 1
@@ -1640,7 +2597,7 @@ function enc(n, d)
         print("Clock B div: " .. clock_div_b)
       else
         patch_weight = util.clamp(patch_weight + (d * 0.05), 0.0, 1.0)
-        
+
         if edit_mode and selected_patch then
           engine.patch_weight(
             selected_patch.src_reg,
@@ -1651,290 +2608,491 @@ function enc(n, d)
           )
           selected_patch.weight = patch_weight
         end
-        
+
         print("Weight: " .. string.format("%.2f", patch_weight))
       end
     end
     
   elseif current_page == 2 then
-    if n == 1 then
-      swing = util.clamp(swing + (d * 0.01), 0, 1)
-      params:set("swing", swing)
-      
-    elseif n == 2 then
+    if n == 2 then
+      if k1_held then
+        -- K1+E2: Swing subdivision
+        swingSubdiv = util.clamp(swingSubdiv + d, 2, 4)
+        params:set("swing_subdiv", swingSubdiv == 2 and 1 or 2)
+        local subdivStr = swingSubdiv == 2 and "8th" or "16th"
+        print("Swing subdivision: " .. subdivStr)
+      else
+        swing = util.clamp(swing + (d * 0.01), 0, 1)
+        params:set("swing", swing)
+      end
+
+    elseif n == 3 then
       local lengths = {4, 8, 16, 32, 64}
       local current_index = tab.key(lengths, bar_length) or 3
       local new_index = util.clamp(current_index + d, 1, #lengths)
       bar_length = lengths[new_index]
       params:set("bar_length", new_index)
     end
-    
+
   elseif current_page == 3 then
-    if n == 1 then
-      chaos_amount = util.clamp(chaos_amount + (d * 0.01), 0, 1)
-      params:set("chaos", chaos_amount)
-      
-    elseif n == 2 then
-      local k1_held = (util.time() - last_k1_time) < 0.3
-      
+    if n == 2 then
       if k1_held then
+        -- K1+E2: Clock multiplier A
         clock_mult_a = util.clamp(clock_mult_a + (d * 0.25), 0.25, 4.0)
         params:set("clock_mult_a", clock_mult_a)
         print("Clock mult A: " .. string.format("%.2fx", clock_mult_a))
+      else
+        chaos_amount = util.clamp(chaos_amount + (d * 0.01), 0, 1)
+        params:set("chaos", chaos_amount)
+      end
+
+    elseif n == 3 then
+      if k1_held then
+        -- K1+E3: Clock multiplier B
+        clock_mult_b = util.clamp(clock_mult_b + (d * 0.25), 0.25, 4.0)
+        params:set("clock_mult_b", clock_mult_b)
+        print("Clock mult B: " .. string.format("%.2fx", clock_mult_b))
       else
         pattern_length_a = util.clamp(pattern_length_a + d, 1, 8)
         params:set("pattern_length_a", pattern_length_a)
         print("Pattern length A: " .. pattern_length_a)
       end
-      
-    elseif n == 3 then
-      local k1_held = (util.time() - last_k1_time) < 0.3
-      
-      if k1_held then
-        clock_mult_b = util.clamp(clock_mult_b + (d * 0.25), 0.25, 4.0)
-        params:set("clock_mult_b", clock_mult_b)
-        print("Clock mult B: " .. string.format("%.2fx", clock_mult_b))
-      else
-        pattern_length_b = util.clamp(pattern_length_b + d, 1, 8)
-        params:set("pattern_length_b", pattern_length_b)
-        print("Pattern length B: " .. pattern_length_b)
-      end
     end
     
   elseif current_page == 4 then
-    if n == 1 then
+    if n == 2 then
       input_mod_amount = util.clamp(input_mod_amount + (d * 0.01), 0, 1)
       params:set("input_mod_amount", input_mod_amount)
-      
-    elseif n == 2 then
+
+    elseif n == 3 then
       input_gain = util.clamp(input_gain + (d * 0.1), 0, 4.0)
       params:set("input_gain", input_gain)
-      
-    elseif n == 3 then
-      local exp_d = d * 0.01
-      input_smoothing = util.clamp(input_smoothing * (1 + exp_d), 0.001, 1.0)
-      params:set("input_smoothing", input_smoothing)
     end
     
   elseif current_page == 5 then
-    if n == 3 then
-      mod_amount = util.clamp(mod_amount + (d * 0.01), -1, 1)
-      print("Mod amount: " .. string.format("%.2f", mod_amount))
+    if n == 2 then
+      -- E2: Select scale
+      voice_quantize_scale[selected_voice + 1] = util.clamp(
+        voice_quantize_scale[selected_voice + 1] + d,
+        0, #SCALE_NAMES - 1  -- 0=chromatic, 1-12=scales
+      )
+      engine.voice_quantize(selected_voice, voice_quantize_scale[selected_voice + 1])
+      print("Voice " .. (selected_voice + 1) .. " scale: " .. SCALE_NAMES[voice_quantize_scale[selected_voice + 1] + 1])
+      redraw()
+      
+    elseif n == 3 then
+      -- E3: Root note (only if not chromatic)
+      if voice_quantize_scale[selected_voice + 1] > 0 then
+        voice_root_note[selected_voice + 1] = util.clamp(
+          voice_root_note[selected_voice + 1] + d,
+          0, 11  -- C to B
+        )
+        engine.voice_root(selected_voice, voice_root_note[selected_voice + 1])
+        print("Voice " .. (selected_voice + 1) .. " root: " .. NOTE_NAMES[voice_root_note[selected_voice + 1] + 1])
+        redraw()
+      else
+        -- If chromatic scale, control modulation amount as before
+        mod_amount = util.clamp(mod_amount + (d * 0.01), -1, 1)
+        print("Mod amount: " .. string.format("%.2f", mod_amount))
+      end
+    end
+
+  elseif current_page == 6 then
+    -- Voice Sound page
+    if n == 2 then
+      -- E2: Select parameter
+      sound_page_param = util.clamp(sound_page_param + d, 1, #SOUND_PARAMS)
+      print("Param: " .. SOUND_PARAMS[sound_page_param].label)
+
+    elseif n == 3 then
+      -- E3: Adjust parameter value
+      local param_def = SOUND_PARAMS[sound_page_param]
+      local cache = voice_param_cache[sound_page_voice + 1]
+      local current_value = cache[param_def.name]
+      local new_value = util.clamp(current_value + (d * param_def.step), param_def.min, param_def.max)
+
+      -- Update cache
+      cache[param_def.name] = new_value
+
+      -- Send to engine
+      engine.set_voice_param(sound_page_voice, param_def.name, new_value)
+
+      print(param_def.label .. ": " .. param_def.format(new_value))
     end
   end
-  
+
   grid_redraw()
   redraw()
 end
 
-function grid_redraw()
-  g:all(0)
+-- Helper function: check if a register stage has a source patch feeding it
+function rebuild_source_patch_cache()
+  -- Clear cache
+  source_patch_cache = {
+    a = {},
+    b = {}
+  }
   
-  if current_page == 5 then
-    for i, src in ipairs(MOD_SOURCES) do
-      local index = i - 1
-      local col = math.floor(index / 8) + 1
-      local row = (index % 8) + 1
-      
-      if col <= 8 then
-        local brightness = 4
-        
-        if mod_source_selected and 
-           mod_source_selected.type == src.type and
-           mod_source_selected.index == src.index then
-          brightness = 15
-        end
-        
-        for _, m in ipairs(mod_matrix) do
-          if m.src_type == src.type and m.src_index == src.index then
-            brightness = math.max(brightness, 8)
-            break
-          end
-        end
-        
-        g:led(col, row, brightness)
-      end
-    end
-    
-    for i, param in ipairs(MOD_DESTINATIONS) do
-      local brightness_a = 4
-      if mod_dest_selected and 
-         mod_dest_selected.voice == 0 and 
-         mod_dest_selected.param == param then
-        brightness_a = 15
-      end
-      for _, m in ipairs(mod_matrix) do
-        if (m.dest_voice == 0 or m.dest_voice == 2) and m.dest_param == param then
-          brightness_a = math.max(brightness_a, 8)
-          break
-        end
-      end
-      g:led(9, i, brightness_a)
-      
-      local brightness_b = 4
-      if mod_dest_selected and 
-         mod_dest_selected.voice == 1 and 
-         mod_dest_selected.param == param then
-        brightness_b = 15
-      end
-      for _, m in ipairs(mod_matrix) do
-        if (m.dest_voice == 1 or m.dest_voice == 2) and m.dest_param == param then
-        brightness_b = math.max(brightness_b, 8)
-          break
-        end
-      end
-      g:led(11, i, brightness_b)
-      
-      local brightness_both = 4
-      if mod_dest_selected and 
-         mod_dest_selected.voice == 2 and 
-         mod_dest_selected.param == param then
-        brightness_both = 15
-      end
-      for _, m in ipairs(mod_matrix) do
-        if m.dest_voice == 2 and m.dest_param == param then
-          brightness_both = math.max(brightness_both, 8)
-          break
-        end
-      end
-      g:led(13, i, brightness_both)
-    end
-    
-    if mod_source_selected then
-      for _, m in ipairs(mod_matrix) do
-        if m.src_type == mod_source_selected.type and 
-           m.src_index == mod_source_selected.index then
-          for i, param in ipairs(MOD_DESTINATIONS) do
-            if param == m.dest_param then
-              local voice_col = m.dest_voice == 0 and 9 or 
-                              (m.dest_voice == 1 and 11 or 13)
-              
-              local flash = math.floor(util.time() * 4) % 2 == 0
-              if flash then
-                g:led(voice_col, i, 12)
-              end
-              break
-            end
-          end
-        end
-      end
-    end
-    
-  else
-    for i=1,8 do
-      local brightness = math.floor(shift_reg_a[i] * 10) + 4
-      brightness = math.max(brightness, pulse_brightness[REG_A_OUT][i])
-      if i > pattern_length_a then brightness = 2 end
-      g:led(REG_A_OUT, i, brightness)
-      g:led(REG_A_IN, i, 4)
-    end
-    
-    for i=1,8 do
-      local brightness = math.floor(shift_reg_b[i] * 10) + 4
-      brightness = math.max(brightness, pulse_brightness[REG_B_OUT][i])
-      if i > pattern_length_b then brightness = 2 end
-      g:led(REG_B_OUT, i, brightness)
-      g:led(REG_B_IN, i, 4)
-    end
-    
-    for i, op in ipairs(LOGIC_OPS) do
-      local index = i - 1
-      local col = LOGIC_COL_START + math.floor(index / 8)
-      local row = (index % 8) + 1
-      
-      if col <= LOGIC_COL_END then
-        local brightness = 3
-        
-        if op.id == selected_logic then
-          brightness = 12
-        end
-        
-        if logic_mode or edit_mode then
-          brightness = brightness + 2
-        end
-        
-        g:led(col, row, brightness)
-      end
-    end
-    
-    for row=1,8 do
-      local brightness = 2
-      local threshold = math.floor(patch_weight * 8)
-      if (9 - row) <= threshold then
-        brightness = 8
-      end
-      g:led(WEIGHT_COL, row, brightness)
-    end
-    
-    if edit_mode and selected_patch then
-      local src_col = selected_patch.src_reg == 'a' and REG_A_OUT or REG_B_OUT
-      local dst_col = selected_patch.dst_reg == 'a' and REG_A_IN or REG_B_IN
-      
-      local blink = math.floor(util.time() * 4) % 2 == 0
-      if blink then
-        g:led(src_col, selected_patch.src_stage + 1, 15)
-        g:led(dst_col, selected_patch.dst_stage + 1, 15)
-      end
-    end
-    
-    if patch_mode and patch_source then
-      local col = patch_source.reg == 'a' and REG_A_OUT or REG_B_OUT
-      g:led(col, patch_source.stage + 1, 15)
-    end
-    
-    for _, patch in ipairs(patches) do
-      local src_col = patch.src_reg == 'a' and REG_A_OUT or REG_B_OUT
-      local dst_col = patch.dst_reg == 'a' and REG_A_IN or REG_B_IN
-      local weight_brightness = math.floor(patch.weight * 8) + 4
-      
-      if not (edit_mode and patch == selected_patch) then
-        local src_brightness = weight_brightness
-        if pulse_brightness[src_col][patch.src_stage + 1] > 0 then
-          src_brightness = 15
-        end
-        g:led(src_col, patch.src_stage + 1, src_brightness)
-        g:led(dst_col, patch.dst_stage + 1, weight_brightness)
-      end
-      
-      for i, op in ipairs(LOGIC_OPS) do
-        if op.id == patch.logic then
-          local index = i - 1
-          local logic_col = LOGIC_COL_START + math.floor(index / 8)
-          local logic_row = (index % 8) + 1
-          
-          if logic_col <= LOGIC_COL_END then
-            local logic_brightness = 6
-            if pulse_brightness[src_col][patch.src_stage + 1] > 8 then
-              logic_brightness = 12
-            end
-            g:led(logic_col, logic_row, logic_brightness)
-          end
-          break
-        end
-      end
-    end
-    
-    for _, patch in ipairs(patches) do
-      local src_col = patch.src_reg == 'a' and REG_A_OUT or REG_B_OUT
-      local dst_col = patch.dst_reg == 'a' and REG_A_IN or REG_B_IN
-      local src_row = patch.src_stage + 1
-      local dst_row = patch.dst_stage + 1
-      
-      for x = src_col + 1, LOGIC_COL_START - 1 do
-        g:led(x, src_row, 2)
-      end
-      
-      for x = LOGIC_COL_END + 1, dst_col - 1 do
-        g:led(x, dst_row, 2)
+  -- Rebuild cache from patches
+  for _, patch in ipairs(patches) do
+    if patch.src_type == "source" then
+      local reg = patch.dst_reg
+      local stage = patch.dst_stage
+      if source_patch_cache[reg] then
+        source_patch_cache[reg][stage] = true
       end
     end
   end
+end
+
+function has_source_patch(reg, stage)
+  -- Use cache instead of iterating through all patches
+  return source_patch_cache[reg] and source_patch_cache[reg][stage] or false
+end
+
+function grid_redraw()
+  if not (g and g.device) then return end
   
+  g:all(0)
+
+
+
+  -- Page 5: Voice Modulation Matrix
+  if current_page == 5 then
+    -- Draw modulation matrix (columns 1-12 for params, rows 1-8 for register stages)
+    for x = 1, 12 do
+      for y = 1, 8 do
+        local param = VOICE_PARAMS[x]
+        local stage = y - 1
+        local brightness = 2  -- Dim for available slots
+
+        -- Check if this modulation exists for the selected voice
+        local mod = find_voice_mod(selected_voice, selected_register, stage, param)
+        if mod then
+          brightness = 10  -- Bright for active modulation
+        end
+
+        g:led(x, y, brightness)
+      end
+    end
+
+    -- Draw register selection buttons (column 14, rows 1-2)
+    g:led(14, 1, (selected_register == 'a') and 15 or 6)  -- Register A
+    g:led(14, 2, (selected_register == 'b') and 15 or 6)  -- Register B
+
+    -- Draw voice selection buttons (column 15, rows 1-4)
+    -- Always show rows 1-2, show 3-4 only in 4-voice mode
+    for v = 0, voice_count - 1 do
+      local row = v + 1
+      local brightness = (v == selected_voice) and 15 or 6
+      g:led(15, row, brightness)
+    end
+
+    -- Columns 13, 16: Reserved for future features
+
+  elseif current_page == 6 then
+    -- Page 6: Voice Sound (Oscillator Control)
+    -- Draw voice selection buttons (column 15, rows 1-4)
+    for v = 0, voice_count - 1 do
+      local row = v + 1
+      local brightness = (v == sound_page_voice) and 15 or 6
+      g:led(15, row, brightness)
+    end
+
+  elseif current_page == 1 and patch_viz_mode then
+    -- Patch Visualization Mode (Page 1a)
+    -- Draw a visual map of all patches
+
+    -- Draw sources (columns 10-12, rows 3-5) - dimmed
+    for i, src in ipairs(SOURCES) do
+      local brightness = 4
+      -- Highlight if source has any patches
+      for _, patch in ipairs(patches) do
+        if patch.src_reg == src.name then
+          brightness = 10
+          break
+        end
+      end
+      g:led(src.col, src.row, brightness)
+    end
+
+    -- Draw registers (columns 1-2 for A, 15-16 for B)
+    -- Register A stages
+    for i=1,8 do
+      local has_input = false
+      local has_output = false
+
+      for _, patch in ipairs(patches) do
+        if patch.dst_reg == 'a' and patch.dst_stage == (i-1) then
+          has_input = true
+        end
+        if patch.src_reg == 'a' and patch.src_stage == (i-1) then
+          has_output = true
+        end
+      end
+
+      g:led(1, i, has_input and 12 or 3)  -- Input side
+      g:led(2, i, has_output and 12 or 3) -- Output side
+    end
+
+    -- Register B stages
+    for i=1,8 do
+      local has_input = false
+      local has_output = false
+
+      for _, patch in ipairs(patches) do
+        if patch.dst_reg == 'b' and patch.dst_stage == (i-1) then
+          has_input = true
+        end
+        if patch.src_reg == 'b' and patch.src_stage == (i-1) then
+          has_output = true
+        end
+      end
+
+      g:led(15, i, has_input and 12 or 3)  -- Input side
+      g:led(16, i, has_output and 12 or 3) -- Output side
+    end
+
+    -- Draw patch count indicator in center (columns 6-11, row 4)
+    local patch_count = #patches
+    local indicator_leds = math.min(patch_count, 6)
+    for i=1,6 do
+      if i <= indicator_leds then
+        g:led(5 + i, 4, 10)
+      else
+        g:led(5 + i, 4, 2)
+      end
+    end
+
+  else
+    -- NEW LAYOUT: Horizontal registers (rows 3-6, cols 5-12)
+    
+    -- Register A (rows 2-3)
+    for stage=0,7 do
+      local col = stage_to_col(stage)
+      local base_brightness = math.floor(shift_reg_a[stage + 1] * 10) + 4
+      if stage >= pattern_length_a then base_brightness = 2 end
+
+      local brightness_out = base_brightness
+      local brightness_in = 2  -- Dimmer to distinguish input from output
+
+      -- Pulse effect on output row
+      if has_source_patch('a', stage) and pulse_brightness[col] and pulse_brightness[col][REG_A_OUT_ROW] and pulse_brightness[col][REG_A_OUT_ROW] > 0 then
+        local pulse_mult = 1.0 + (pulse_brightness[col][REG_A_OUT_ROW] * 0.5)
+        brightness_out = math.floor(base_brightness * pulse_mult)
+        brightness_out = math.min(brightness_out, 15)
+      end
+
+      g:led(col, REG_A_OUT_ROW, brightness_out)  -- Output row
+      g:led(col, REG_A_IN_ROW, brightness_in)     -- Input row
+    end
+
+    -- Register B (rows 5-6)
+    for stage=0,7 do
+      local col = stage_to_col(stage)
+      local base_brightness = math.floor(shift_reg_b[stage + 1] * 10) + 4
+      if stage >= pattern_length_b then base_brightness = 2 end
+
+      local brightness_out = base_brightness
+      local brightness_in = 2  -- Dimmer to distinguish input from output
+
+      -- Pulse effect on output row
+      if has_source_patch('b', stage) and pulse_brightness[col] and pulse_brightness[col][REG_B_OUT_ROW] and pulse_brightness[col][REG_B_OUT_ROW] > 0 then
+        local pulse_mult = 1.0 + (pulse_brightness[col][REG_B_OUT_ROW] * 0.5)
+        brightness_out = math.floor(base_brightness * pulse_mult)
+        brightness_out = math.min(brightness_out, 15)
+      end
+
+      g:led(col, REG_B_OUT_ROW, brightness_out)  -- Output row
+      g:led(col, REG_B_IN_ROW, brightness_in)     -- Input row
+    end
+
+    -- Source 3x3 grid display (top-left: rows 1-3, cols 1-3)
+    for i, src in ipairs(SOURCES) do
+      local value = source_values[src.name] or 0.5
+      local base_brightness = math.floor(value * 13) + 2  -- Range: 2-15
+
+      local brightness = base_brightness
+
+      -- Apply pulse flash for ALL sources
+      if pulse_brightness[src.col] and pulse_brightness[src.col][src.row] and pulse_brightness[src.col][src.row] > 0 then
+        local pulse_mult = 1.0 + (pulse_brightness[src.col][src.row] * 0.5)
+        brightness = math.floor(base_brightness * pulse_mult)
+        brightness = math.min(brightness, 15)
+      end
+
+      g:led(src.col, src.row, brightness)
+    end
+
+    -- Operators (right side: cols 14-16, rows 1-5) - only show during patch edit
+    if patch_edit_mode then
+      for row = OP_ROW_START, OP_ROW_END do
+        for col = OP_COL_START, OP_COL_END do
+          local op_index = ((row - OP_ROW_START) * 3) + (col - OP_COL_START)
+          local brightness = 3
+          
+          if op_index < #LOGIC_OPS then
+            local op = LOGIC_OPS[op_index + 1]
+            if patch_edit_data and op.id == patch_edit_data.logic then
+              brightness = 12
+            end
+          end
+          
+          g:led(col, row, brightness)
+        end
+      end
+      
+      -- Weights (left side: cols 1-2, rows 1-8) - only show during patch edit
+      for row = WEIGHT_ROW_START, WEIGHT_ROW_END do
+        for col = WEIGHT_COL_START, WEIGHT_COL_END do
+          local weight_index = ((row - WEIGHT_ROW_START) * 2) + (col - WEIGHT_COL_START)
+          local weight_level = (weight_index + 1) / 16.0
+          local brightness = 3
+          
+          if patch_edit_data and math.abs(weight_level - patch_edit_data.weight) < 0.07 then
+            brightness = 12
+          end
+          
+          g:led(col, row, brightness)
+        end
+      end
+    end
+    
+    -- Patch selection mode: highlight all connected nodes
+    if patch_selection_mode then
+      local blink = math.floor(util.time() * 6) % 2 == 0
+      if blink then
+        for _, patch in ipairs(patch_selection_list) do
+          if patch_selection_pressed.is_output then
+            -- Pressed output - highlight all destinations
+            local dst_col = stage_to_col(patch.dst_stage)
+            local dst_row = patch.dst_reg == 'a' and REG_A_IN_ROW or REG_B_IN_ROW
+            g:led(dst_col, dst_row, 15)
+          else
+            -- Pressed input - highlight all sources
+            local src_col = stage_to_col(patch.src_stage)
+            local src_row = patch.src_reg == 'a' and REG_A_OUT_ROW or REG_B_OUT_ROW
+            g:led(src_col, src_row, 15)
+          end
+        end
+      end
+    end
+    
+    -- Highlight source node during patch creation
+    if patch_edit_mode and patch_edit_data and patch_edit_data.is_creating then
+      if patch_edit_data.src_type == "source" then
+        -- Highlight audio input source
+        for _, src in ipairs(SOURCES) do
+          if src.name == patch_edit_data.src_reg then
+            g:led(src.col, src.row, 15)
+            break
+          end
+        end
+      else
+        -- Highlight register stage
+        local col = stage_to_col(patch_edit_data.src_stage)
+        local row = patch_edit_data.src_reg == 'a' and REG_A_OUT_ROW or REG_B_OUT_ROW
+        g:led(col, row, 15)
+      end
+    end
+    
+    for _, patch in ipairs(patches) do
+      local src_col, src_row
+      if patch.is_source then
+        -- Find the source position in 3x3 grid
+        for _, src in ipairs(SOURCES) do
+          if src.name == patch.src_reg then
+            src_col = src.col
+            src_row = src.row
+            break
+          end
+        end
+      else
+        src_col = stage_to_col(patch.src_stage)
+        src_row = patch.src_reg == 'a' and REG_A_OUT_ROW or REG_B_OUT_ROW
+      end
+
+      local dst_col = stage_to_col(patch.dst_stage)
+      local dst_row = patch.dst_reg == 'a' and REG_A_IN_ROW or REG_B_IN_ROW
+      local weight_brightness = math.floor(patch.weight * 8) + 4
+
+      if not (edit_mode and patch == selected_patch) then
+        local src_brightness = weight_brightness
+
+        -- Override for source patches: use source value brightness
+        if patch.is_source then
+          local value = source_values[patch.src_reg] or 0.5
+          src_brightness = math.floor(value * 13) + 2  -- Same formula as source display
+        end
+
+        -- Add pulse for register stages (not sources) - multiplicative
+        if not patch.is_source and pulse_brightness[src_col] and pulse_brightness[src_col][src_row] and pulse_brightness[src_col][src_row] > 0 then
+          local pulse_mult = 1.0 + (pulse_brightness[src_col][src_row] * 0.5)
+          src_brightness = math.floor(src_brightness * pulse_mult)
+          src_brightness = math.min(src_brightness, 15)
+        end
+
+        g:led(src_col, src_row, src_brightness)
+        g:led(dst_col, dst_row, weight_brightness)
+      end
+
+      -- TODO: Logic operator visualization disabled - needs redesign for new layout
+      -- for i, op in ipairs(LOGIC_OPS) do
+      --   if op.id == patch.logic then
+      --     local index = i - 1
+      --     local logic_col = LOGIC_COL_START + math.floor(index / 8)
+      --     local logic_row = (index % 8) + 1
+      --     if logic_col <= LOGIC_COL_END then
+      --       local logic_brightness = 6
+      --       if not patch.is_source and pulse_brightness[src_col] and pulse_brightness[src_col][src_row] and pulse_brightness[src_col][src_row] > 0.5 then
+      --         logic_brightness = 12
+      --       end
+      --       g:led(logic_col, logic_row, logic_brightness)
+      --     end
+      --     break
+      --   end
+      -- end
+    end
+    
+    for _, patch in ipairs(patches) do
+      local src_col, src_row
+      if patch.is_source then
+        -- Find the source position in 3x3 grid
+        for _, src in ipairs(SOURCES) do
+          if src.name == patch.src_reg then
+            src_col = src.col
+            src_row = src.row
+            break
+          end
+        end
+      else
+        src_col = stage_to_col(patch.src_stage)
+        src_row = patch.src_reg == 'a' and REG_A_OUT_ROW or REG_B_OUT_ROW
+      end
+
+      local dst_col = stage_to_col(patch.dst_stage)
+      local dst_row = patch.dst_reg == 'a' and REG_A_IN_ROW or REG_B_IN_ROW
+
+      -- TODO: Patch connection lines disabled - needs redesign for new layout
+      -- for x = src_col + 1, LOGIC_COL_START - 1 do
+      --   g:led(x, src_row, 2)
+      -- end
+      -- for x = LOGIC_COL_END + 1, dst_col - 1 do
+      --   g:led(x, dst_row, 2)
+      -- end
+    end
+  end
+  
+  -- Gate routing indicators (row 8)
+  g:led(2, CLOCK_CTRL_ROW, gate_route_a2 and 12 or 4)  -- A→Voice 2
+  g:led(3, CLOCK_CTRL_ROW, gate_route_a1 and 12 or 4)  -- A→Voice 1
   g:led(4, CLOCK_CTRL_ROW, clock_a_enabled and (mute_a and 4 or 12) or 2)
   
   local tap_brightness = 6
-  if pulse_brightness[TEMPO_TAP_COL] and pulse_brightness[TEMPO_TAP_COL][CLOCK_CTRL_ROW] then
-    tap_brightness = pulse_brightness[TEMPO_TAP_COL][CLOCK_CTRL_ROW]
+  if pulse_brightness[TEMPO_TAP_COL] and pulse_brightness[TEMPO_TAP_COL][CLOCK_CTRL_ROW] and pulse_brightness[TEMPO_TAP_COL][CLOCK_CTRL_ROW] > 0 then
+    local pulse_mult = 1.0 + (pulse_brightness[TEMPO_TAP_COL][CLOCK_CTRL_ROW] * 0.5)
+    tap_brightness = math.floor(6 * pulse_mult)
+    tap_brightness = math.min(tap_brightness, 15)
   end
   g:led(TEMPO_TAP_COL, CLOCK_CTRL_ROW, tap_brightness)
   
@@ -1946,9 +3104,19 @@ function grid_redraw()
   g:led(11, CLOCK_CTRL_ROW, 6)
   
   g:led(12, CLOCK_CTRL_ROW, clock_b_enabled and (mute_b and 4 or 12) or 2)
-  g:led(13, CLOCK_CTRL_ROW, clock_running and 15 or 8)
-  g:led(14, CLOCK_CTRL_ROW, 8)
-  g:led(16, CLOCK_CTRL_ROW, reset_on_downbeat and 12 or 4)
+
+  -- Clock start/stop button with pulse
+  local clock_btn_brightness = clock_running and 15 or 8
+  if pulse_brightness[13] and pulse_brightness[13][CLOCK_CTRL_ROW] and pulse_brightness[13][CLOCK_CTRL_ROW] > 0 then
+    local pulse_mult = 1.0 + (pulse_brightness[13][CLOCK_CTRL_ROW] * 0.5)
+    clock_btn_brightness = math.floor(clock_btn_brightness * pulse_mult)
+    clock_btn_brightness = math.min(clock_btn_brightness, 15)
+  end
+  g:led(13, CLOCK_CTRL_ROW, clock_btn_brightness)
+
+  g:led(14, CLOCK_CTRL_ROW, gate_route_b1 and 12 or 4)  -- B→Voice 1
+  g:led(15, CLOCK_CTRL_ROW, gate_route_b2 and 12 or 4)  -- B→Voice 2
+  g:led(16, CLOCK_CTRL_ROW, 8)  -- Clock reset
   
   if freeze_a then
     local blink = math.floor(util.time() * 2) % 2 == 0
@@ -1965,6 +3133,166 @@ function grid_redraw()
   end
   
   g:refresh()
+end
+
+-- Helper function: get abbreviated logic operator name
+function get_logic_short_name(logic_id)
+  local short_names = {
+    "REP",   -- REPLACE
+    "ADD",   -- ADD
+    "SUB",   -- SUBTRACT
+    "MUL",   -- MULTIPLY
+    "AVG",   -- AVERAGE
+    "MIN",   -- MIN
+    "MAX",   -- MAX
+    "AND",   -- AND
+    "OR",    -- OR
+    "XOR",   -- XOR
+    "GT",    -- GREATER THAN
+    "LT",    -- LESS THAN
+    "MOD"    -- MODULO
+  }
+  return short_names[logic_id + 1] or "?"
+end
+
+-- Helper function: format patch compactly for display
+function format_patch_compact(patch)
+  local src, dst, logic
+
+  -- Format source
+  if patch.is_source then
+    src = patch.src_reg:sub(1, 3)  -- Abbreviate source names
+  else
+    src = patch.src_reg:upper() .. patch.src_stage
+  end
+
+  -- Format destination
+  dst = patch.dst_reg:upper() .. patch.dst_stage
+
+  -- Get abbreviated logic name
+  local logic_short = get_logic_short_name(patch.logic)
+
+  -- Format: "src→dst LOG w:0.8"
+  return src .. "→" .. dst .. " " .. logic_short .. " " .. string.format("%.1f", patch.weight)
+end
+
+function draw_patch_edit_screen()
+  if not patch_edit_data then return end
+  
+  local patch = patch_edit_data
+  screen.clear()
+  screen.level(15)
+  
+  -- Title
+  screen.move(0, 10)
+  screen.font_face(1)
+  screen.font_size(8)
+  screen.text(patch.is_creating and "CREATE PATCH" or "EDIT PATCH")
+  
+  -- Source and destination
+  screen.move(0, 22)
+  screen.level(10)
+  local src = ""
+  if patch.src_type == "source" then
+    src = "Input " .. patch.src_stage
+  else
+    src = patch.src_reg:upper() .. patch.src_stage
+  end
+  local dst = patch.dst_reg ~= "?" and (patch.dst_reg:upper() .. patch.dst_stage) or "?"
+  screen.text(src .. " → " .. dst)
+  
+  -- Operator name (large)
+  screen.move(0, 38)
+  screen.level(15)
+  screen.font_size(10)
+  local op_name = get_logic_name(patch.logic)
+  screen.text(op_name)
+  
+  -- Operator description
+  screen.move(0, 50)
+  screen.level(8)
+  screen.font_size(8)
+  local op_desc = get_logic_description(patch.logic)
+  screen.text(op_desc)
+  
+  -- Weight
+  screen.move(0, 62)
+  screen.level(15)
+  screen.text(string.format("Weight: %.2f", patch.weight))
+  
+  -- Instructions
+  screen.move(0, 76)
+  screen.level(5)
+  screen.text("E2: Operator  E3: Weight")
+  screen.move(0, 84)
+  if patch.is_creating then
+    screen.text("K2: Cancel    K3: Next →")
+  else
+    screen.text("K2: Delete    K3: Save")
+  end
+  
+  screen.update()
+end
+
+function draw_patch_selection_screen()
+  if not patch_selection_mode or #patch_selection_list == 0 then return end
+  
+  screen.clear()
+  screen.level(15)
+  
+  -- Title
+  screen.move(0, 10)
+  screen.font_face(1)
+  screen.font_size(8)
+  screen.text("SELECT PATCH")
+  
+  -- Pressed node info
+  if patch_selection_pressed then
+    local node = patch_selection_pressed
+    local node_str = ""
+    if node.is_output then
+      node_str = node.reg:upper() .. node.stage .. " (out)"
+    else
+      node_str = node.reg:upper() .. node.stage .. " (in)"
+    end
+    screen.move(0, 22)
+    screen.level(10)
+    screen.text(node_str)
+  end
+  
+  -- Patch list
+  local start_y = 32
+  for i = 1, math.min(3, #patch_selection_list) do
+    local patch = patch_selection_list[i]
+    screen.move(5, start_y + (i - 1) * 10)
+    
+    if i == patch_selection_index then
+      screen.level(15)
+      screen.text("> ")
+      screen.move(15, start_y + (i - 1) * 10)
+    else
+      screen.level(8)
+    end
+    
+    -- Format patch info
+    local src = ""
+    if patch.src_type == "source" then
+      src = "In" .. patch.src_stage
+    else
+      src = patch.src_reg:upper() .. patch.src_stage
+    end
+    local dst = patch.dst_reg:upper() .. patch.dst_stage
+    local logic_short = get_logic_short_name(patch.logic)
+    
+    screen.text(src .. "→" .. dst .. " " .. logic_short)
+  end
+  
+  -- Instructions
+  screen.move(0, 60)
+  screen.level(5)
+  screen.text("E2: Navigate  K3: Select")
+  
+  screen.update()
 end
 
 function draw_main_page()
@@ -2029,51 +3357,46 @@ function draw_main_page()
     screen.text("R")
   end
   
-  screen.level(15)
-  screen.move(0, 35)
-  screen.text("Register A:")
+  -- Compact register display
+  screen.level(10)
+  screen.move(0, 30)
+  screen.text("A")
   for i=1,8 do
     local level = clock_a_enabled and math.floor(shift_reg_a[i] * 15) or 2
     screen.level(level)
-    screen.rect(10 + (i*8), 40, 6, 6)
+    screen.rect(10 + (i*7), 26, 5, 5)
     screen.fill()
   end
-  
-  screen.level(15)
-  screen.move(0, 55)
-  screen.text("Register B:")
+
+  screen.level(10)
+  screen.move(0, 40)
+  screen.text("B")
   for i=1,8 do
     local level = clock_b_enabled and math.floor(shift_reg_b[i] * 15) or 2
     screen.level(level)
-    screen.rect(10 + (i*8), 60, 6, 6)
+    screen.rect(10 + (i*7), 36, 5, 5)
     screen.fill()
   end
   
+  -- Patch count
   screen.level(15)
-  screen.move(0, 75)
-  if edit_mode and selected_patch then
-    screen.text("EDIT: " .. selected_patch.src_reg .. "[" .. selected_patch.src_stage .. "] -> " ..
-                selected_patch.dst_reg .. "[" .. selected_patch.dst_stage .. "]")
-    screen.move(0, 85)
-    screen.level(10)
-    screen.text(get_logic_name(selected_patch.logic) .. 
-                " w:" .. string.format("%.2f", selected_patch.weight))
-  elseif patch_mode and patch_source then
-    screen.text("PATCH: " .. patch_source.reg .. "[" .. patch_source.stage .. "]")
-    screen.move(0, 85)
-    screen.level(10)
-    screen.text(get_logic_name(selected_logic) .. 
-                " w:" .. string.format("%.2f", patch_weight))
+  screen.move(0, 48)
+  if #patches == 0 then
+    screen.level(8)
+    screen.text("No patches")
   else
     screen.text("Patches: " .. #patches)
   end
-  
+
+  -- Help text
   screen.level(5)
-  screen.move(0, 100)
-  screen.text("K1:start E1:tempo")
-  screen.move(0, 110)
-  screen.text("Hold K1: page  +E2/3:divs")
-  
+  screen.move(0, 64)
+  if k1_held then
+    screen.text("K1: E1=tempo E2=divA E3=divB")
+  else
+    screen.text("E1=page  Long press: edit patch")
+  end
+
   screen.update()
 end
 
@@ -2117,41 +3440,20 @@ function draw_clock_page()
   screen.fill()
   
   screen.level(10)
-  screen.move(0, 60)
-  screen.text("Subdiv:")
-  screen.level(15)
-  screen.move(50, 60)
-  screen.text(swing_subdiv == 2 and "8th" or "16th")
-  
+  screen.move(0, 56)
+  screen.text("Bar: " .. bar_length .. " beats")
+
   screen.level(10)
-  screen.move(0, 70)
-  screen.text("Bar:")
-  screen.level(15)
-  screen.move(50, 70)
-  screen.text(bar_length .. " beats")
-  
+  screen.move(70, 56)
+  screen.text("Reset:" .. (reset_on_downbeat and "On" or "Off"))
+
   screen.level(10)
-  screen.move(0, 80)
-  screen.text("Reset:")
-  screen.level(15)
-  screen.move(50, 80)
-  screen.text(reset_on_downbeat and "On" or "Off")
-  
-  screen.level(10)
-  screen.move(0, 90)
-  screen.text("Clocks:")
-  screen.level(clock_a_enabled and 15 or 5)
-  screen.move(50, 90)
-  screen.text("A")
-  screen.level(clock_b_enabled and 15 or 5)
-  screen.move(65, 90)
-  screen.text("B")
-  
-  screen.level(5)
-  screen.move(0, 105)
-  screen.text("E1:swing E2:bar")
-  screen.move(0, 115)
-  screen.text("K1:page K2:reset K3:toggles")
+  screen.move(0, 64)
+  if k1_held then
+    screen.text("K1: E1=page E2=subdiv E3=bar")
+  else
+    screen.text("E1=page E2=swing E3=bar")
+  end
   
   screen.update()
 end
@@ -2209,46 +3511,18 @@ function draw_performance_page()
   end
   
   screen.level(10)
-  screen.move(0, 68)
-  screen.text("Speed:")
-  screen.level(15)
-  screen.move(45, 68)
-  screen.text(string.format("A:%.2fx", clock_mult_a))
-  screen.move(85, 68)
-  screen.text(string.format("B:%.2fx", clock_mult_b))
-  
-  screen.level(10)
-  screen.move(0, 80)
-  screen.text("Chaos:")
-  screen.level(15)
-  screen.move(45, 80)
-  screen.text(string.format("%.0f%%", chaos_amount * 100))
-  
-  local chaos_width = math.floor(chaos_amount * 78)
+  screen.move(0, 61)
+  screen.text("Chaos:" .. string.format("%.0f%%", chaos_amount * 100))
+  screen.move(60, 61)
+  screen.text("Mut:" .. string.format("%.0f%%", mutation_rate * 100))
+
   screen.level(5)
-  screen.rect(45, 83, 78, 2)
-  screen.fill()
-  screen.level(15)
-  screen.rect(45, 83, chaos_width, 2)
-  screen.fill()
-  
-  screen.level(10)
-  screen.move(0, 92)
-  screen.text("Mutation:")
-  screen.level(15)
-  screen.move(60, 92)
-  screen.text(string.format("%.0f%%", mutation_rate * 100))
-  
-  screen.level(10)
-  screen.move(0, 104)
-  screen.text("Feedback:")
-  screen.level(15)
-  screen.move(60, 104)
-  screen.text(string.format("%.0f%%", feedback_amount * 100))
-  
-  screen.level(5)
-  screen.move(0, 118)
-  screen.text("K2:mute K3:freeze E1:chaos")
+  screen.move(0, 64)
+  if k1_held then
+    screen.text("K1: E1=page E2=multA E3=multB")
+  else
+    screen.text("E1=page E2=chaos E3=patA")
+  end
   
   screen.update()
 end
@@ -2258,171 +3532,285 @@ function draw_audio_input_page()
   screen.level(15)
   screen.move(0, 10)
   screen.text("AUDIO INPUT")
-  
+
+  -- Mod Amount with bar (Y=20-24)
   screen.level(10)
-  screen.move(0, 25)
-  screen.text("Mod Amount:")
+  screen.move(0, 20)
+  screen.text("Amt:")
   screen.level(15)
-  screen.move(75, 25)
+  screen.move(30, 20)
   screen.text(string.format("%.0f%%", input_mod_amount * 100))
-  
-  local mod_width = math.floor(input_mod_amount * 118)
+
+  local mod_width = math.floor(input_mod_amount * 60)
   screen.level(5)
-  screen.rect(5, 28, 118, 3)
+  screen.rect(65, 17, 60, 3)
   screen.fill()
   screen.level(15)
-  screen.rect(5, 28, mod_width, 3)
+  screen.rect(65, 17, mod_width, 3)
   screen.fill()
-  
+
+  -- Gain and Smoothing (Y=30)
+  screen.level(10)
+  screen.move(0, 30)
+  screen.text("Gain:")
+  screen.level(15)
+  screen.move(35, 30)
+  screen.text(string.format("%.1fx", input_gain))
+
+  screen.level(10)
+  screen.move(65, 30)
+  screen.text("Smooth:")
+  screen.level(15)
+  screen.move(105, 30)
+  screen.text(string.format("%.0f", input_smoothing * 1000))
+
+  -- Target and Register (Y=40)
   screen.level(10)
   screen.move(0, 40)
-  screen.text("Input Gain:")
+  screen.text("Tgt:")
   screen.level(15)
-  screen.move(75, 40)
-  screen.text(string.format("%.1fx", input_gain))
-  
-  screen.level(10)
-  screen.move(0, 50)
-  screen.text("Smoothing:")
-  screen.level(15)
-  screen.move(75, 50)
-  screen.text(string.format("%.0fms", input_smoothing * 1000))
-  
-  screen.level(10)
-  screen.move(0, 65)
-  screen.text("Target:")
-  screen.level(15)
-  screen.move(50, 65)
+  screen.move(25, 40)
   local targets = {"Pitch", "Gates", "All", "Complex"}
   screen.text(targets[input_mod_target + 1])
-  
+
   screen.level(10)
-  screen.move(0, 75)
-  screen.text("Modulates:")
+  screen.move(65, 40)
+  screen.text("Reg:")
   screen.level(15)
-  screen.move(70, 75)
+  screen.move(90, 40)
   local regs = {"A", "B", "Both"}
   screen.text(regs[input_mod_reg + 1])
-  
+
+  -- Input Level meter (Y=48-54)
   screen.level(10)
-  screen.move(0, 90)
-  screen.text("Input Level:")
-  
-  local env_width = math.floor(input_envelope * 80)
+  screen.move(0, 50)
+  screen.text("Level:")
+
+  local env_width = math.floor(input_envelope * 85)
   screen.level(5)
-  screen.rect(5, 93, 80, 6)
+  screen.rect(38, 47, 85, 4)
   screen.stroke()
   screen.level(15)
-  screen.rect(5, 93, env_width, 6)
+  screen.rect(38, 47, env_width, 4)
   screen.fill()
-  
+
+  -- Pitch (Y=58)
   screen.level(10)
-  screen.move(0, 105)
+  screen.move(0, 58)
   screen.text("Pitch:")
   screen.level(15)
-  screen.move(40, 105)
+  screen.move(35, 58)
   screen.text(string.format("%.1f Hz", input_pitch))
-  
+
+  -- Help text (Y=64)
   screen.level(5)
-  screen.move(0, 118)
-  screen.text("E1:amt E2:gain E3:smooth K3:target")
-  
+  screen.move(0, 64)
+  screen.text("E1:page E2:amt E3:gain")
+
   screen.update()
 end
 
-function draw_mod_matrix_page()
+function draw_voice_mod_page()
   screen.clear()
   screen.level(15)
   screen.move(0, 10)
-  screen.text("MODULATION MATRIX")
-  
+  screen.text("VOICE MOD")
+
+  -- Show current selection (Y=20)
+  -- Match grid layout: Register (col 14) on left, Voice (col 15) on right
   screen.level(10)
-  screen.move(110, 10)
-  screen.text(#mod_matrix)
-  
-  if #mod_matrix > 0 then
-    screen.level(10)
-    screen.move(0, 25)
-    screen.text("Active:")
-    
-    local y = 35
-    for i = 1, math.min(#mod_matrix, 6) do
-      local m = mod_matrix[i]
-      local src_name = get_source_name(m.src_type, m.src_index)
-      local dest_name = MOD_DEST_NAMES[m.dest_param] or m.dest_param
-      local voice_name = m.dest_voice == 0 and "A" or (m.dest_voice == 1 and "B" or "AB")
-      
+  screen.move(0, 20)
+  screen.text("Reg:" .. selected_register:upper())
+
+  screen.move(50, 20)
+  screen.text("V:" .. (selected_voice + 1) .. "/" .. voice_count)
+
+  -- Show active modulations for current voice
+  local mods = voice_mod_matrix[selected_voice + 1]
+  local mod_count = #mods
+
+  screen.level(10)
+  screen.move(0, 30)
+  screen.text("Active (" .. mod_count .. "):")
+
+  if mod_count > 0 then
+    local y = 38
+    for i = 1, math.min(mod_count, 2) do  -- Show fewer mods to make room for quantization
+      local m = mods[i]
+      local stage_name = m.src_reg:upper() .. m.src_stage
+      local param_name = VOICE_PARAM_NAMES[m.param] or m.param
+
       screen.level(8)
       screen.move(0, y)
-      screen.text(src_name .. " -> " .. voice_name .. ":" .. dest_name)
-      
-      screen.level(15)
-      screen.move(100, y)
-      screen.text(string.format("%.2f", m.amount))
-      
+      screen.text(stage_name .. " -> " .. param_name)
+
       y = y + 8
     end
-    
-    if #mod_matrix > 6 then
+
+    if mod_count > 2 then
       screen.level(5)
-      screen.move(0, y)
-      screen.text("+" .. (#mod_matrix - 6) .. " more")
+      screen.move(0, 48)
+      screen.text("+" .. (mod_count - 2) .. " more")
     end
   else
     screen.level(5)
-    screen.move(0, 35)
+    screen.move(0, 38)
     screen.text("No modulations")
   end
-  
-  screen.level(15)
-  screen.move(0, 90)
-  if mod_source_selected then
-    screen.text("Src: " .. get_source_name(mod_source_selected.type, mod_source_selected.index))
-  else
-    screen.level(5)
-    screen.text("Select source")
-  end
-  
-  screen.level(15)
-  screen.move(0, 100)
-  if mod_dest_selected then
-    local voice_name = mod_dest_selected.voice == 0 and "A" or 
-                      (mod_dest_selected.voice == 1 and "B" or "Both")
-    local param_name = MOD_DEST_NAMES[mod_dest_selected.param]
-    screen.text("Dst: " .. voice_name .. ":" .. param_name)
-  else
-    screen.level(5)
-    screen.text("Select destination")
-  end
-  
+
+  -- Pitch quantization display
   screen.level(10)
-  screen.move(0, 110)
-  screen.text("Amount:")
-  screen.level(15)
-  screen.move(50, 110)
-  screen.text(string.format("%.0f%%", mod_amount * 100))
+  screen.move(0, 58)
+  screen.text("Quantize:")
   
-  local amt_width = math.floor(math.abs(mod_amount) * 60)
-  local amt_x = mod_amount >= 0 and 64 or (64 - amt_width)
-  screen.level(5)
-  screen.rect(4, 113, 120, 2)
-  screen.fill()
   screen.level(15)
-  screen.rect(64, 113, 1, 2)
-  screen.fill()
+  screen.move(60, 58)
+  local scale_name = SCALE_NAMES[voice_quantize_scale[selected_voice + 1] + 1] or "Unknown"
+  screen.text(scale_name)
+  
+  if voice_quantize_scale[selected_voice + 1] > 0 then  -- If not chromatic
+    screen.level(10)
+    screen.move(0, 68)
+    screen.text("Root:")
+    
+    screen.level(15)
+    screen.move(30, 68)
+    local root_name = NOTE_NAMES[voice_root_note[selected_voice + 1] + 1] or "C"
+    screen.text(root_name)
+  end
+
+  -- Help text
+  screen.level(5)
+  screen.move(0, 86)
+  screen.text("E2:scale E3:root ALT[16,7] Mod")
+
+  screen.update()
+end
+
+function draw_voice_sound_page()
+  screen.clear()
+  screen.level(15)
+  screen.move(0, 10)
+  screen.text("VOICE SOUND")
+
+  -- Voice indicator
+  screen.level(10)
+  screen.move(0, 20)
+  screen.text("Voice: " .. (sound_page_voice + 1) .. "/" .. voice_count)
+
+  -- Get cached parameter values for current voice
+  local cache = voice_param_cache[sound_page_voice + 1]
+  local param_def = SOUND_PARAMS[sound_page_param]
+
+  -- Show current parameter (highlighted)
+  screen.level(15)
+  screen.move(0, 30)
+  screen.text("> " .. param_def.label)
+
+  -- Show current value
   screen.level(12)
-  screen.rect(amt_x, 113, amt_width, 2)
-  screen.fill()
-  
+  screen.move(0, 38)
+  screen.text(param_def.format(cache[param_def.name]))
+
+  -- Show next 3 parameters as preview
+  local y = 48
+  for i = 1, 3 do
+    local preview_idx = sound_page_param + i
+    if preview_idx <= #SOUND_PARAMS then
+      local preview_def = SOUND_PARAMS[preview_idx]
+      screen.level(6)
+      screen.move(0, y)
+      screen.text(preview_def.label .. ": " .. preview_def.format(cache[preview_def.name]))
+      y = y + 6
+    end
+  end
+
+  -- Help text
   screen.level(5)
-  screen.move(0, 125)
-  screen.text("Use Grid to select  K3:add/remove")
-  
+  screen.move(0, 64)
+  screen.text("E2:param E3:value Grid:voice")
+
+  screen.update()
+end
+
+function draw_patch_viz_page()
+  screen.clear()
+  screen.level(15)
+  screen.move(0, 10)
+  screen.text("PATCH VISUALIZATION")
+
+  if #patches > 0 then
+    -- Clamp patch index
+    patch_viz_index = util.clamp(patch_viz_index, 1, #patches)
+    local patch = patches[patch_viz_index]
+
+    -- Show current patch info
+    screen.level(15)
+    screen.move(0, 22)
+    screen.text("Patch " .. patch_viz_index .. "/" .. #patches)
+
+    local src_str
+    if patch.src_reg == "random" or patch.src_reg == "low" or patch.src_reg == "mid" or
+       patch.src_reg == "high" or patch.src_reg == "max" or patch.src_reg == "param1" or
+       patch.src_reg == "param2" or patch.src_reg == "voice1" or patch.src_reg == "voice2" then
+      src_str = patch.src_reg:sub(1,5)
+    else
+      src_str = patch.src_reg:upper() .. patch.src_stage
+    end
+
+    local dst_str = patch.dst_reg:upper() .. patch.dst_stage
+
+    screen.level(12)
+    screen.move(0, 32)
+    screen.text("Route: " .. src_str .. " -> " .. dst_str)
+
+    -- Logic operator
+    screen.level(10)
+    screen.move(0, 42)
+    screen.text("Logic:")
+    screen.level(15)
+    screen.move(42, 42)
+    screen.text(get_logic_short_name(patch.logic) .. " (" .. LOGIC_OPS[patch.logic + 1].name .. ")")
+
+    -- Weight
+    screen.level(10)
+    screen.move(0, 52)
+    screen.text("Weight:")
+    screen.level(15)
+    screen.move(42, 52)
+    screen.text(string.format("%.2f", patch.weight))
+
+    -- Weight bar
+    local bar_width = math.floor(patch.weight * 80)
+    screen.level(5)
+    screen.rect(42, 54, 80, 2)
+    screen.fill()
+    screen.level(15)
+    screen.rect(42, 54, bar_width, 2)
+    screen.fill()
+
+  else
+    screen.level(5)
+    screen.move(0, 30)
+    screen.text("No patches")
+  end
+
+  -- Help text
+  screen.level(5)
+  screen.move(0, 64)
+  screen.text("E1:sel E2:logic E3:wt K3:del")
+
   screen.update()
 end
 
 function redraw()
-  if current_page == 1 then
+  if patch_edit_mode then
+    draw_patch_edit_screen()
+  elseif patch_selection_mode then
+    draw_patch_selection_screen()
+  elseif current_page == 1 and patch_viz_mode then
+    draw_patch_viz_page()
+  elseif current_page == 1 then
     draw_main_page()
   elseif current_page == 2 then
     draw_clock_page()
@@ -2431,14 +3819,28 @@ function redraw()
   elseif current_page == 4 then
     draw_audio_input_page()
   elseif current_page == 5 then
-    draw_mod_matrix_page()
+    draw_voice_mod_page()
+  elseif current_page == 6 then
+    draw_voice_sound_page()
   end
-  
+
   screen.update()
 end
 
 function cleanup()
   engine.stop()
-  clock.cancel(animation_clock)
-  clock.cancel(screen_refresh_clock)
+  if animation_clock then clock.cancel(animation_clock) end
+  if screen_refresh_clock then clock.cancel(screen_refresh_clock) end
+  if random_source_clock then clock.cancel(random_source_clock) end
+  if clock_button_pulse_clock then clock.cancel(clock_button_pulse_clock) end
+  
+  -- Clear OSC event handler to prevent messages after cleanup
+  osc.event = nil
+  
+  -- Disconnect grid
+  if g and g.device then
+    g.key = nil
+    g:all(0)
+    g:refresh()
+  end
 end
